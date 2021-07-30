@@ -1,18 +1,17 @@
 import os
+import os.path
 import json
-#ENV VARIABLES IMPORT FOR DEBUGGING, DO NOT DEPLOY THE FOLLOWING:
-with open('debug_env.json') as r:
-    env_dict = list(json.loads(r.read()).items())
-    for k, v in env_dict:
-        os.environ[k] = v
-#REMOVE UP TO HERE
 import telegram as tg
 import telegram.ext as tg_ext
 import random
 import boardgame_api
 
-group_thread = tg_ext.DelayQueue(burst_limit = 20)
-pm_thread = tg_ext.DelayQueue()
+if os.path.exists('debug_env.json'):
+    with open('debug_env.json') as r:
+        os.environ.update(json.load(r))
+
+group_thread = tg_ext.DelayQueue(burst_limit = 20, exc_route = breakpoint)
+pm_thread = tg_ext.DelayQueue(exc_route = breakpoint)
 
 def avoid_spam(f):
     def decorated(update, context):
@@ -24,20 +23,26 @@ def avoid_spam(f):
     return decorated
 
 def update_ui(bot, data, match_id):
-    msg_ids = []
+    msg_ids = {}
     for msg in data:
+        if msg['chat_id'] == 0:
+            continue
         reply_markup = []
-        for row in msg.get('answers'):
+        for row in msg.get('answers', []):
             reply_markup.append([tg.InlineKeyboardButton(text = i['text'],
-                                                      callback_data = {'target_id': match_id,
-                                                                       'expected_uid': msg.get('expected_uid'),
-                                                                       'args': i['callback_data']}) for i in row])
+                                callback_data = {'target_id': match_id,
+                                        'expected_uid': msg.get('expected_uid'),
+                                        'args': i['callback_data']}) for i in row])
         reply_markup = tg.InlineKeyboardMarkup(reply_markup) if reply_markup else None
         
         if msg.get('msg_id'):
             if msg.get('img'):
                 bot.edit_message_media(chat_id = msg['chat_id'], message_id = msg['msg_id'],
                                        media = tg.InputMediaPhoto(msg['img'], caption = msg.get('text', '')),
+                                       reply_markup = reply_markup)
+            elif msg.get('gif'):
+                bot.edit_message_media(chat_id = msg['chat_id'], message_id = msg['msg_id'],
+                                       media = tg.InputMediaAnimation(msg['gif'], caption = msg.get('text', '')),
                                        reply_markup = reply_markup)
             else:
                 bot.edit_message_text(chat_id = msg['chat_id'], message_id = msg['msg_id'],
@@ -47,10 +52,12 @@ def update_ui(bot, data, match_id):
         else:
             if msg.get('img'):
                 msg = bot.send_photo(msg['chat_id'], msg['img'], caption = msg.get('text', ''), reply_markup = reply_markup)
+            elif msg.get('gif'):
+                msg = bot.send_photo(msg['chat_id'], msg['gif'], caption = msg.get('text', ''), reply_markup = reply_markup)
             else:
                 msg = bot.send_message(msg['chat_id'], msg['text'], reply_markup = reply_markup)
                 
-            msg_ids.append(msg.message_id)
+            msg_ids[msg['chat_id']] = msg.message_id
     return msg_ids
             
 defaults = tg_ext.Defaults(quote = True)
@@ -60,51 +67,67 @@ updater.dispatcher.bot_data = {'queue': {'chess': []}, 'matches': {}}
 
 @avoid_spam
 def start(update, context):
-    update.effective_chat.send_message(text = 'Привет! Чтобы сыграть в шахматы и не только, введи команду /play')
+    update.effective_chat.send_message(text = 'Привет! Чтобы сыграть, введи команду /play')
 updater.dispatcher.add_handler(tg_ext.CommandHandler('start', start))
 
 @avoid_spam
 def boardgame_menu(update, context):
-    update.effective_message.reply_text(text = 'Выберите игру:',
-        reply_markup = tg.InlineKeyboardMarkup([[tg.InlineKeyboardButton(text = 'Шахматы',
-                                                                         callback_data = {'target_id': 'MAIN',
-                                                                                          'command': 'NEW',
-                                                                                          'game': 'chess',
-                                                                                          'expected_uid': update.effective_user.id})],
-                                               [tg.InlineKeyboardButton(text = 'Нарды',
-                                                                        callback_data = {'target_id': 'MAIN',
-                                                                                          'command': 'NA',
-                                                                                          'game': 'rps',
-                                                                                          'expected_uid': update.effective_user.id})]]))
+    keyboard = tg.InlineKeyboardMarkup([
+        [tg.InlineKeyboardButton(text = i['text'], callback_data = {'target_id': 'MAIN',
+                    'command': 'NEW',
+                    'expected_uid': update.effective_user.id,
+                    'game': 'chess',
+                    'mode': i['code']})] for i in getattr(boardgame_api, 'chess').MODES])
+    update.effective_message.reply_text('Выберите режим:', reply_markup = keyboard)
 updater.dispatcher.add_handler(tg_ext.CommandHandler('play', boardgame_menu))
 
 @avoid_spam
-def button_callback(update, context, data = None):
-    args = data if data else update.callback_query.data
-    print(args)
-    if not data and args['expected_uid'] != update.callback_query.from_user.id:
+def button_callback(update, context):
+    args = update.callback_query.data
+    
+    if type(args) == tg_ext.InvalidCallbackData:
+        update.callback_query.answer('Ошибка: информация о сообщении не найдена.')
+        return
+
+    if args['expected_uid'] != update.callback_query.from_user.id:
         if args['target_id'] == 'MAIN':
             update.callback_query.answer()
         else:
-            update.callback_query.answer(text = context.bot_data['matches'][args['target_id']].WRONG_PERSON_MSG,
-                                         show_alert = True)
+            update.callback_query.answer(text = context.bot_data['matches'][args['target_id']].WRONG_PERSON_MSG, show_alert = True)
         return
     
     if args['target_id'] == 'MAIN':
         if args['command'] == 'NA':
             update.callback_query.answer(text = 'Недоступно', show_alert = True)
+        elif args['command'] == 'CHOOSE_MODE':
+            keyboard = tg.InlineKeyboardMarkup([
+                [tg.InlineKeyboardButton(text = i['text'], callback_data = {'target_id': 'MAIN',    
+                            'command': 'NEW',
+                            'expected_uid': update.effective_user.id,
+                            'game': args['game'],
+                            'mode': i['code']})] for i in getattr(boardgame_api, args['game']).MODES
+            ])
+            update.effective_message.edit_text(text = 'Выберите режим:', reply_markup = keyboard)
         elif args['command'] == 'NEW':
-            if len(context.bot_data['queue'][args['game']]) > 0:
+            if args['mode'] == 'AI':
+                update.effective_message.edit_text('Игра найдена')
+                new = getattr(boardgame_api, args['game']).AIMatch(update.effective_user, update.effective_chat)
+                context.bot_data['matches'][new.id] = new
+                
+                msg_ids = update_ui(context.bot, new.init_turn(setup = True), new.id)
+                context.bot_data['matches'][new.id].ids.update(msg_ids)
+                
+            elif len(context.bot_data['queue'][args['game']]) > 0:
                 queued_user, queued_chat, queued_msg = context.bot_data['queue'][args['game']].pop(0)
                 if queued_chat == update.effective_chat:
                     new = getattr(boardgame_api, args['game']).GroupMatch(queued_user,
-                                                                     update.effective_user,
-                                                                     update.effective_chat)
+                                            update.effective_user,
+                                            update.effective_chat.id)
                 else:
                     new = getattr(boardgame_api, args['game']).PMMatch(queued_user,
-                                                                       update.effective_user,
-                                                                       queued_chat,
-                                                                       update.effective_chat)
+                                            update.effective_user,
+                                            queued_chat.id,
+                                            update.effective_chat.id)
                 queued_msg.edit_text(text = 'Игра найдена')
                 update.effective_message.edit_text(text = 'Игра найдена')
                 context.bot_data['matches'][new.id] = new
@@ -130,7 +153,7 @@ def button_callback(update, context, data = None):
     else:
         res = context.bot_data['matches'][args['target_id']].handle_input(args['args'])
         msg_ids = update_ui(context.bot, res, args['target_id'])
-        context.bot_data['matches'][args['target_id']].ids += msg_ids
+        context.bot_data['matches'][args['target_id']].ids.update(msg_ids)
         if context.bot_data['matches'][args['target_id']].finished:
             del context.bot_data['matches'][args['target_id']]
         update.callback_query.answer()
