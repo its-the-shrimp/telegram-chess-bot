@@ -760,7 +760,7 @@ class AIMatch(PMMatch):
     def __init__(self, player, chat, player2 = None, **kwargs):
         ai_player = player2 if player2 else chat.bot.get_me()
         super().__init__(player, ai_player, chat.id, 0, **kwargs)
-        self.engine_api = subprocess.Popen('./stockfish', bufsize = 1, universal_newlines = True, shell = True, 
+        self.engine_api = subprocess.Popen(os.environ['ENGINE_FILENAME'], bufsize = 1, universal_newlines = True, shell = True, 
                 stdin = subprocess.PIPE, stdout = subprocess.PIPE)
         
         self.engine_api.stdout.readline()

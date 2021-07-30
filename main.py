@@ -10,8 +10,8 @@ if os.path.exists('debug_env.json'):
     with open('debug_env.json') as r:
         os.environ.update(json.load(r))
 
-group_thread = tg_ext.DelayQueue(burst_limit = 20, exc_route = breakpoint)
-pm_thread = tg_ext.DelayQueue(exc_route = breakpoint)
+group_thread = tg_ext.DelayQueue()
+pm_thread = tg_ext.DelayQueue()
 
 def avoid_spam(f):
     def decorated(update, context):
