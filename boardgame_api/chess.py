@@ -9,7 +9,7 @@ import cv2
 import numpy
 
 IDSAMPLE = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-+'
-MODES = [{'text': 'Против ИИ', 'code': 'AI'}, {'text': 'Обычная игра', 'code': 'QUICK'}]
+MODES = [{'text': 'Против бота', 'code': 'AI'}, {'text': 'Онлайн', 'code': 'QUICK'}]
 FENSYMBOLS = {'k': 'King',
               'q': 'Queen',
               'r': 'Rook',
