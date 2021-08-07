@@ -266,9 +266,6 @@ class BaseMatch():
             self.states = []
             self.finished = False
             self.id = ''.join(random.choices(IDSAMPLE, k = 8))
-            self.image_filename = f'chess-{self.id}.jpg'
-            self.video_filename = f'chess-{self.id}.mp4'
-            
             board, self.is_white_turn, castlings, self.enpassant_pos, self.empty_halfturns, self.turn = [int(i) - 1 if i.isdigit() else i for i in fen.split(' ')]
             
             self.is_white_turn = self.is_white_turn != 'w'
@@ -430,8 +427,8 @@ class BaseMatch():
             return board.convert(mode = 'RGB')
         
     def get_video(self):
-        path = os.path.join('images', 'temp', f'chess-{self.id}.mp4')
-        writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'avc1'), 15.0, (500, 500))
+        path = os.path.join('images', 'temp', f'chess-{self.id}.avi')
+        writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'XVID'), 15.0, (500, 500))
         
         for fen in self.states:
             img = self.visualise_board(fen = fen, return_bytes = False)
@@ -443,15 +440,11 @@ class BaseMatch():
         
         for i in range(15):
             writer.write(img_array)
-            
-        thumb_buffer = io.BytesIO()
-        img.thumbnail((200, 200))
-        img.save(thumb_buffer, format = 'JPEG')
         
         writer.release()
-        video_data = open(path, 'rb').read()
+        data = open(path, 'rb').read()
         os.remove(path)
-        return video_data, thumb_buffer.getvalue()
+        return data
         
     def fen_string(self):
         res = [''] * 8
@@ -536,24 +529,12 @@ class GroupMatch(BaseMatch):
             msg += f"\nХодит { context['player'].name }; выберите действие:"
             
         if self.finished:
-            video, thumb = self.get_video()
-            self.msg.edit_media(
-                media = InputMediaVideo(
-                    video,
-                    caption = msg,
-                    filename = self.video_filename,
-                    thumb = thumb
-                )
-            )
+            self.msg.edit_media(media = InputMediaVideo(self.get_video(), caption = msg, filename = f'chess-{self.id}.mp4'))
         else:
             self.init_msg_text = msg
             if self.msg:
                 self.msg.edit_media(
-                    media = InputMediaPhoto(
-                        self.visualise_board(),
-                        caption = msg,
-                        filename = self.image_filename
-                    ),
+                    media = InputMediaPhoto(self.visualise_board(), caption = msg),
                     reply_markup = self._keyboard([
                         {'text': 'Ходить', 'data': ['TURN']},
                         {'text': 'Сдаться', 'data': ['SURRENDER']}
@@ -562,7 +543,6 @@ class GroupMatch(BaseMatch):
             else:
                 self.msg = self.bot.send_photo(self.chat_id, self.visualise_board(),
                     caption = msg,
-                    filename = self.image_filename,
                     reply_markup = self._keyboard([
                         {'text': 'Ходить', 'data': ['TURN']},
                         {'text': 'Сдаться', 'data': ['SURRENDER']}
@@ -589,22 +569,16 @@ class GroupMatch(BaseMatch):
             new_text[-1] = f"Ходит {context['player'].name}; выберите фигуру:"
             
             self.msg.edit_media(
-                media = InputMediaPhoto(
-                    self.visualise_board(),
-                    caption = '\n'.join(new_text),
-                    filename = self.image_filename
-                ),
+                media = InputMediaPhoto(self.visualise_board(), caption = '\n'.join(new_text)),
                 reply_markup = self._keyboard(figure_buttons,  context['player'].id, head_button = True)
             )
         
         elif args[0] == 'SURRENDER':
             self.finished = True
-            video, thumb = self.get_video()
             self.msg.edit_media(media = InputMediaVideo(
-                    video,
+                    self.get_video(),
                     caption = f"Игра окончена: {context['player'].name} сдался.\nХодов: {self.turn - 1}.\nПобедитель: {context['opponent'].name}.",
-                    filename = self.video_filename,
-                    thumb = thumb
+                    filename = f'chess-{self.id}.mp4'
                 )
             )
             
@@ -623,11 +597,7 @@ class GroupMatch(BaseMatch):
             new_text[-1] = f"Ходит {context['player'].name}; выберите новое место фигуры:"
             
             self.msg.edit_media(
-                media = InputMediaPhoto(
-                    self.visualise_board(selected = args[1], pointers = moves),
-                    caption = '\n'.join(new_text),
-                    filename = self.image_filename
-                ),
+                media = InputMediaPhoto(self.visualise_board(selected = args[1], pointers = moves), caption = '\n'.join(new_text)),
                 reply_markup = self._keyboard(dest_buttons, context['player'].id, head_button = True)
             )
             
@@ -642,11 +612,8 @@ class GroupMatch(BaseMatch):
             new_text[-1] = f"Ходит {context['player'].name}; выберите фигуру, в которую првератится пешка:"
             
             self.msg.edit_media(
-                media = InputMediaPhoto(
-                    self.visualise_board(selected = args[1], special = [{'pos': args[2], 'killing': False}]),
-                    caption = '\n'.join(new_text),
-                    filename = self.image_filename
-                ),
+                media = InputMediaPhoto(self.visualise_board(selected = args[1], special = [{'pos': args[2], 'killing': False}]),
+                    caption = '\n'.join(new_text)),
                 reply_markup = self._keyboard(figures, context['player'].id)
             )
             
@@ -711,13 +678,7 @@ class PMMatch(BaseMatch):
             opponent_msg += f"\nХодит {context['player'].name}"
         
         if self.finished:
-            video, thumb = self.get_video()
-            new_msg = InputMediaVideo(
-                video,
-                caption = msg,
-                filename = self.video_filename,
-                thumb = thumb
-            )
+            new_msg = InputMediaVideo(self.visualise_board(), caption = msg)
             for msg in [self.msg1, self.msg2]:
                 msg.edit_media(media = new_msg)
         else:
@@ -727,11 +688,7 @@ class PMMatch(BaseMatch):
                 if chat_id:
                     if msg:
                         msg.edit_media(
-                            media = InputMediaPhoto(
-                                self.visualise_board(),
-                                caption = player_msg if their_turn else opponent_msg,
-                                filename = self.image_filename
-                            ),
+                            media = InputMediaPhoto(self.visualise_board(), caption = player_msg if their_turn else opponent_msg),
                             reply_markup = self._keyboard([
                                     {'text': 'Ходить', 'data': ['TURN']},
                                     {'text': 'Сдаться', 'data': ['SURRENDER']}
@@ -743,7 +700,6 @@ class PMMatch(BaseMatch):
                             chat_id,
                             self.visualise_board(),
                             caption = player_msg if their_turn else opponent_msg,
-                            filename = self.image_filename,
                             reply_markup = self._keyboard([
                                     {'text': 'Ходить', 'data': ['TURN']},
                                     {'text': 'Сдаться', 'data': ['SURRENDER']}
@@ -755,15 +711,11 @@ class PMMatch(BaseMatch):
         context = self.get_context()
         if args[0] == 'INIT_MSG':
             context['player_msg'].edit_media(
-                media = InputMediaPhoto(
-                    self.visualise_board(),
-                    caption = self.init_msg_text,
-                    filename = self.image_filename
-                ),
+                media = InputMediaPhoto(self.visualise_board(), caption = self.init_msg_text),
                 reply_markup = self._keyboard([
                         {'text': 'Ходить', 'data': ['TURN']},
                         {'text': 'Сдаться', 'data': ['SURRENDER']}
-                    ], context['player'].id
+                    ] if their_turn else [], context['player'].id
                 )
             )
         
@@ -780,7 +732,7 @@ class PMMatch(BaseMatch):
                 media = InputMediaPhoto(
                     self.visualise_board(),
                     caption = '\n'.join(new_text),
-                    filename = self.image_filename
+                    filename = f'chess-{self.id}.jpg'
                 ),
                 reply_markup = self._keyboard(figure_buttons, context['player'].id, head_button = True)
             )
@@ -790,13 +742,11 @@ class PMMatch(BaseMatch):
             video = self.get_video()
             for msg in [self.msg1, self.msg2]:
                 if msg:
-                    video, thumb = self.get_video()
                     msg.edit_media(
                         media = InputMediaVideo(
                             video,
                             caption = f"Игра окончена: {context['player'].name} сдался.\nХодов: {self.turn - 1}.\nПобедитель: {context['opponent'].name}.",
-                            filename = self.video_filename,
-                            thumb = thumb
+                            filename = f'chess-{self.id}.mp4'
                         )
                     )
             
@@ -819,7 +769,7 @@ class PMMatch(BaseMatch):
                 media = InputMediaPhoto(
                     self.visualise_board(selected = args[1], pointers = moves),
                     caption = '\n'.join(new_text),
-                    filename = self.image_filename
+                    filename = f'chess-{self.id}.jpg'
                 ),
                 reply_markup = self._keyboard(dest_buttons, context['player'].id, head_button = True)
             )
@@ -839,7 +789,7 @@ class PMMatch(BaseMatch):
                 media = InputMediaPhoto(
                     self.visualise_board(selected = args[1], special = [{'pos': args[2], 'killing': False}]),
                     caption = '\n'.join(new_text),
-                    filename = self.image_filename
+                    filename = f'chess-{self.id}.jpg'
                 ),
                 reply_markup = self._keyboard(figures, context['player'].id)
             )
@@ -867,7 +817,6 @@ class AIMatch(PMMatch):
                 self.chat_id1,
                 self.visualise_board(fen = STARTPOS),
                 caption = 'Выберите уровень сложности:',
-                filename = self.image_filename,
                 reply_markup = self._keyboard([
                     {'text': 'Низкий', 'data': ['SKILL_LEVEL', '1350']},
                     {'text': 'Средний', 'data': ['SKILL_LEVEL', '1850']},
