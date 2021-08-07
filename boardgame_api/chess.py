@@ -1,12 +1,14 @@
 import PIL.Image
 import itertools
-import string
 import random
 import subprocess
 import io
 import os.path
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaVideo
+import cv2
+import numpy
 
-IDSAMPLE = string.ascii_uppercase + string.ascii_lowercase + string.digits + '-+'
+IDSAMPLE = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-+'
 MODES = [{'text': 'Против ИИ', 'code': 'AI'}, {'text': 'Обычная игра', 'code': 'QUICK'}]
 FENSYMBOLS = {'k': 'King',
               'q': 'Queen',
@@ -18,7 +20,19 @@ IMAGES = {}
 for name in ['Pawn', 'King', 'Bishop', 'Rook', 'Queen', 'Knight']:
     IMAGES[name] = [PIL.Image.open(f'images/chess/{color}_{name.lower()}.png') for color in ['black', 'white']]
 STARTPOS = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
-#rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR -> rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR
+
+def _group_buttons(obj, n, head_button = False):
+    res = []
+    for index in range(len(obj)):
+        index -= int(head_button)
+        if index == -1:
+            res.append([obj[0]])
+        elif index // n == index / n:
+            res.append([obj[index + int(head_button)]])
+        else:
+            res[-1].append(obj[index + int(head_button)])
+            
+    return res
 
 def _fentoimagemap(fen):
     res = {}
@@ -245,7 +259,8 @@ class BaseMatch():
     POINTER_IMG = PIL.Image.open("images/chess/pointer.png")
     WRONG_PERSON_MSG = 'Сейчас не ваш ход!'
     
-    def __init__(self, fen = STARTPOS):
+    def __init__(self, bot = None, fen = STARTPOS):
+            self.bot = bot
             self.whites = []
             self.blacks = []
             self.states = []
@@ -303,6 +318,21 @@ class BaseMatch():
         for index, figure in enumerate(self.whites if self[key].is_white else self.blacks):
             if figure.pos == key:
                 del (self.whites if self[key].is_white else self.blacks)[index]
+                
+    def _keyboard(self, data, expected_uid, head_button = False):
+        res = []
+        for button in data:
+            res.append(InlineKeyboardButton(text = button['text'],
+                                                     callback_data = {
+                                                     'target_id': self.id,
+                                                     'expected_uid': expected_uid,
+                                                     'args': button['data']
+                                                    }))
+            
+        if res:
+            return InlineKeyboardMarkup(_group_buttons(res, 2, head_button = head_button))
+        else:
+            return None
                 
     def get_context(self):
         return {'allies': self.whites if self.is_white_turn else self.blacks,
@@ -394,14 +424,24 @@ class BaseMatch():
             board.save(buffer, format = 'JPEG')
             return buffer.getvalue()
         else:
-            return board
+            return board.convert(mode = 'RGB')
         
-    def to_gif(self):
-        frames = [self.visualise_board(fen = fen, return_bytes = False) for fen in self.states]
-            
-        buffer = io.BytesIO()
-        frames[0].save(buffer, format = 'GIF', save_all = True, append_images = frames[1:], duration = 1000)
-        return buffer.getvalue()
+    def get_video(self):
+        path = os.path.join('images', 'temp', f'chess-{self.id}.avi')
+        writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'XVID'), 15.0, (500, 500))
+        
+        for fen in self.states:
+            img = self.visualise_board(fen = fen, return_bytes = False)
+            img_array = numpy.array(img.getdata(), dtype = numpy.uint8).reshape(img.size[1], img.size[0], 3)
+            temp = (img_array[:, :, 2].copy(), img_array[:, :, 0].copy())
+            img_array[:, :, 0], img_array[:, :, 2] = temp
+            for i in range(15):
+                writer.write(img_array)
+        
+        writer.release()
+        data = open(path, 'rb').read()
+        os.remove(path)
+        return data
         
     def fen_string(self):
         res = [''] * 8
@@ -438,11 +478,8 @@ class BaseMatch():
             res[-1] += '-'
         
         res.append(encode_pos(self.enpassant_pos[1]) if self.enpassant_pos[0] else '-')
-        
         res.append(str(self.empty_halfturns))
-        
         res.append(str(self.turn))
-        
         return ' '.join(res)
         
 class GroupMatch(BaseMatch):
@@ -450,7 +487,7 @@ class GroupMatch(BaseMatch):
         self.player1 = player1
         self.player2 = player2
         self.chat_id = match_chat
-        self.ids = {}
+        self.msg = None
         self.last_msg = {}
         super().__init__(**kwargs)
         
@@ -488,104 +525,100 @@ class GroupMatch(BaseMatch):
                 
             msg += f"\nХодит { context['player'].name }; выберите действие:"
             
-        self.init_msg = {
-                 'msg_id': self.ids.get(self.chat_id),
-                 'chat_id': self.chat_id,
-                 'img': self.visualise_board() if not self.finished else None,
-                 'gif': self.to_gif() if self.finished else None,
-                 'text': msg,
-                 'expected_uid': context['player'].id, 
-                 'answers': [
-                     [{'text': 'Ходить', 'callback_data': ['TURN']}],
-                     [{'text': 'Сдаться', 'callback_data': ['SURRENDER']}]
-                 ] if not self.finished else []
-                }
-        self.last_msg = self.init_msg
-        return [self.last_msg]
+        if self.finished:
+            self.msg.edit_media(media = InputMediaVideo(self.get_video(), caption = msg, filename = f'chess-{self.id}.mp4'))
+        else:
+            self.init_msg_text = msg
+            if self.msg:
+                self.msg.edit_media(
+                    media = InputMediaPhoto(self.visualise_board(), caption = msg),
+                    reply_markup = self._keyboard([
+                        {'text': 'Ходить', 'data': ['TURN']},
+                        {'text': 'Сдаться', 'data': ['SURRENDER']}
+                    ], context['player'].id)
+                )
+            else:
+                self.msg = self.bot.send_photo(self.chat_id, self.visualise_board(),
+                    caption = msg,
+                    reply_markup = self._keyboard([
+                        {'text': 'Ходить', 'data': ['TURN']},
+                        {'text': 'Сдаться', 'data': ['SURRENDER']}
+                    ], context['player'].id)
+                )
     
     def handle_input(self, args):
         context = self.get_context()
         if args[0] == 'INIT_MSG':
-            return [{
-                **self.init_msg,
-                'msg_id': self.ids[self.chat_id]
-            }]
+            self.msg.edit_caption(self.init_msg_text,
+                reply_markup = self._keyboard([
+                    {'text': 'Ходить', 'data': ['TURN']},
+                    {'text': 'Сдаться', 'data': ['SURRENDER']}
+                ], context['player'].id)
+            )
             
         if args[0] == 'TURN':
-            figure_buttons = [[{'text': 'Назад', 'callback_data': ['INIT_MSG']}]]
+            figure_buttons = [{'text': 'Назад', 'data': ['INIT_MSG']}]
             for figure in context['allies']:
                 if next(filter(figure.is_legal, [i['pos'] for i in figure.get_moves()]), None):
-                    figure_buttons.append([{'text': str(figure), 'callback_data': ['CHOOSE_FIGURE', figure.pos]}])
-            new_text = self.last_msg['text'].split('\n')
+                    figure_buttons.append({'text': str(figure), 'data': ['CHOOSE_FIGURE', figure.pos]})
+                    
+            new_text = self.init_msg_text.split('\n')
             new_text[-1] = f"Ходит {context['player'].name}; выберите фигуру:"
             
-            self.last_msg = {
-                **self.init_msg,
-                'msg_id': self.ids[self.chat_id],
-                'text': '\n'.join(new_text),
-                'answers': figure_buttons
-            }
-            
-            return [self.last_msg]
+            self.msg.edit_media(
+                media = InputMediaPhoto(self.visualise_board(), caption = '\n'.join(new_text)),
+                reply_markup = self._keyboard(figure_buttons,  context['player'].id, head_button = True)
+            )
         
         elif args[0] == 'SURRENDER':
             self.finished = True
-            return [{
-                **self.init_msg,
-                'msg_id': self.ids[self.chat_id],
-                'img': None,
-                'gif': self.to_gif(),
-                'text': f"Игра окончена: {context['player'].name} сдался.\nХодов: {self.turn - 1}.\nПобедитель: {context['opponent'].name}.",
-                'answers': []
-            }]
+            self.msg.edit_media(media = InputMediaVideo(
+                    self.get_video(),
+                    caption = f"Игра окончена: {context['player'].name} сдался.\nХодов: {self.turn - 1}.\nПобедитель: {context['opponent'].name}.",
+                    filename = f'chess-{self.id}.mp4'
+                )
+            )
             
         elif args[0] == 'CHOOSE_FIGURE':
-            dest_buttons = [[{'text': 'Назад', 'callback_data': ['TURN']}]]
+            dest_buttons = [{'text': 'Назад', 'data': ['TURN']}]
             figure = self[args[1]]
             moves = list(filter(lambda move: figure.is_legal(move['pos']), figure.get_moves()))
             for move in moves:
                 if type(figure) == Pawn and move['pos'][1] == (7 if figure.is_white else 0):
-                    dest_buttons.append([{'text': ('❌⏫' if move['killing'] else '⏫')+encode_pos(move['pos']),
-                                          'callback_data': ['PROMOTION_MENU', args[1], move['pos']]}])
+                    dest_buttons.append({'text': ('❌⏫' if move['killing'] else '⏫')+encode_pos(move['pos']),
+                                          'data': ['PROMOTION_MENU', args[1], move['pos']]})
                 else:
-                    dest_buttons.append([{'text': ('❌' if move['killing'] else '')+encode_pos(move['pos']),
-                                          'callback_data': ['MOVE', args[1], move['pos']]}])
-            new_text = self.last_msg['text'].split('\n')
+                    dest_buttons.append({'text': ('❌' if move['killing'] else '')+encode_pos(move['pos']),
+                                          'data': ['MOVE', args[1], move['pos']]})
+            new_text = self.init_msg_text.split('\n')
             new_text[-1] = f"Ходит {context['player'].name}; выберите новое место фигуры:"
             
-            self.last_msg = {
-                **self.last_msg,
-                'img': self.visualise_board(selected = args[1], pointers = moves),
-                'text': '\n'.join(new_text),
-                'answers': dest_buttons
-            }
-            
-            return [self.last_msg]
+            self.msg.edit_media(
+                media = InputMediaPhoto(self.visualise_board(selected = args[1], pointers = moves), caption = '\n'.join(new_text)),
+                reply_markup = self._keyboard(dest_buttons, context['player'].id, head_button = True)
+            )
             
         elif args[0] == 'PROMOTION_MENU':
             figures = [
-                [{'text': 'Ферзь', 'callback_data': ['PROMOTION', args[1], args[2], 'q']}],
-                [{'text': 'Конь', 'callback_data': ['PROMOTION', args[1], args[2], 'n']}],
-                [{'text': 'Слон', 'callback_data': ['PROMOTION', args[1], args[2], 'b']}],
-                [{'text': 'Ладья', 'callback_data': ['PROMOTION', args[1], args[2], 'r']}]
+                {'text': 'Ферзь', 'data': ['PROMOTION', args[1], args[2], 'q']},
+                {'text': 'Конь', 'data': ['PROMOTION', args[1], args[2], 'n']},
+                {'text': 'Слон', 'data': ['PROMOTION', args[1], args[2], 'b']},
+                {'text': 'Ладья', 'data': ['PROMOTION', args[1], args[2], 'r']}
             ]
-            new_text = self.last_msg['text'].split('\n')
+            new_text = self.init_msg_text.split('\n')
             new_text[-1] = f"Ходит {context['player'].name}; выберите фигуру, в которую првератится пешка:"
             
-            self.last_msg = {
-                **self.last_msg,
-                'img': self.visualise_board(selected = args[1], special = [{'pos': args[2], 'killing': False}]),
-                'text': '\n'.join(new_text),
-                'answers': figures
-            }
-            
-            return [self.last_msg]
+            self.msg.edit_media(
+                media = InputMediaPhoto(self.visualise_board(selected = args[1], special = [{'pos': args[2], 'killing': False}]),
+                    caption = '\n'.join(new_text)),
+                reply_markup = self._keyboard(figures, context['player'].id)
+            )
             
         elif args[0] == 'PROMOTION':
-            return self.init_turn(move = args[1:3], promotion = args[3])
+            self.init_turn(move = args[1:3], promotion = args[3])
             
         elif args[0] == 'MOVE':
-            return self.init_turn(move = args[1:3])
+            self.init_turn(move = args[1:3])
         
 class PMMatch(BaseMatch):
     def __init__(self, player1, player2, chat1, chat2, **kwargs):
@@ -593,16 +626,20 @@ class PMMatch(BaseMatch):
         self.player2 = player2
         self.chat_id1 = chat1
         self.chat_id2 = chat2
-        self.ids = {}
-        self.last_msg = {}
+        self.msg1 = None
+        self.msg2 = None
         super().__init__(**kwargs)
         
     def get_context(self):
         context = super().get_context()
-        context.update({'player': self.player1 if context['white_turn'] else self.player2,
+        context.update({
+                'player': self.player1 if context['white_turn'] else self.player2,
                 'opponent': self.player2 if context['white_turn'] else self.player1,
                 'player_chat': self.chat_id1 if context['white_turn'] else self.chat_id2,
-                'opponent_chat': self.chat_id2 if context['white_turn'] else self.chat_id1})
+                'opponent_chat': self.chat_id2 if context['white_turn'] else self.chat_id1,
+                'player_msg': self.msg1 if context['white_turn'] else self.msg2,
+                'opponent_msg': self.msg2 if context['white_turn'] else self.msg1
+                       })
         
         return context
         
@@ -636,119 +673,123 @@ class PMMatch(BaseMatch):
                 
             player_msg += '\nВыберите действие:'
             opponent_msg += f"\nХодит {context['player'].name}"
-            
-        img = self.visualise_board() if not self.finished else None
-        gif  = self.to_gif() if self.finished else None
-        self.init_msg = {
-            'player': {
-                'msg_id': self.ids.get(context['player_chat']),
-                'chat_id': context['player_chat'],
-                'img': img,
-                'gif': gif,
-                'text': player_msg,
-                'expected_uid': context['player'].id,
-                'answers': [
-                    [{'text': 'Ходить', 'callback_data': ['TURN']}],
-                    [{'text': 'Сдаться', 'callback_data': ['SURRENDER']}]
-                ] if res['player_gamestate'] != 'checkmate' else []
-            },'opponent': {
-                'msg_id': self.ids.get(context['opponent_chat']),
-                'chat_id': context['opponent_chat'],
-                'img': img,
-                'gif': gif,
-                'text': opponent_msg
-            }
-        }
-        self.last_msg = self.init_msg
-        return list(self.last_msg.values())
+        
+        if self.finished:
+            new_msg = InputMediaVideo(self.visualise_board(), caption = msg)
+            for msg in [self.msg1, self.msg2]:
+                msg.edit_media(media = new_msg)
+        else:
+            self.init_msg_text = player_msg
+            for msg, chat_id, player, their_turn in ([self.msg1, self.chat_id1, self.player1, context['white_turn']],
+                                                     [self.msg2, self.chat_id2, self.player2, not context['white_turn']]):
+                if chat_id:
+                    if msg:
+                        msg.edit_media(
+                            media = InputMediaPhoto(self.visualise_board(), caption = player_msg if their_turn else opponent_msg),
+                            reply_markup = self._keyboard([
+                                    {'text': 'Ходить', 'data': ['TURN']},
+                                    {'text': 'Сдаться', 'data': ['SURRENDER']}
+                                ] if their_turn else [], player.id
+                            )
+                        )
+                    else:
+                        self.bot.send_photo(
+                            chat_id,
+                            self.visualise_board(),
+                            caption = player_msg if their_turn else opponent_msg,
+                            reply_markup = self._keyboard([
+                                    {'text': 'Ходить', 'data': ['TURN']},
+                                    {'text': 'Сдаться', 'data': ['SURRENDER']}
+                                ] if their_turn else [], player.id
+                            )
+                        )
     
     def handle_input(self, args):
         context = self.get_context()
         if args[0] == 'INIT_MSG':
-            return [{
-                **self.init_msg['player'],
-                'msg_id': self.ids[context['player_chat']]
-            }]
+            context['player_msg'].edit_media(
+                media = InputMediaPhoto(self.visualise_board(), caption = self.init_msg_text),
+                reply_markup = self._keyboard([
+                        {'text': 'Ходить', 'data': ['TURN']},
+                        {'text': 'Сдаться', 'data': ['SURRENDER']}
+                    ] if their_turn else [], context['player'].id
+                )
+            )
         
         if args[0] == 'TURN':
-            figure_buttons = [[{'text': 'Назад', 'callback_data': ['INIT_MSG']}]]
+            figure_buttons = [{'text': 'Назад', 'data': ['INIT_MSG']}]
             for figure in context['allies']:
                 if next(filter(figure.is_legal, [i['pos'] for i in figure.get_moves()]), None):
-                    figure_buttons.append([{'text': str(figure), 'callback_data': ['CHOOSE_FIGURE', figure.pos]}])
-            new_text = self.last_msg['player']['text'].split('\n')
+                    figure_buttons.append({'text': str(figure), 'data': ['CHOOSE_FIGURE', figure.pos]})
+                    
+            new_text = self.init_msg_text.split('\n')
             new_text[-1] = f"Выберите фигуру:"
             
-            self.last_msg['player'] = {
-                **self.init_msg['player'],
-                'img': self.visualise_board(),
-                'msg_id': self.ids[context['player_chat']],
-                'text': '\n'.join(new_text),
-                'answers': figure_buttons
-            }
-            
-            return [self.last_msg['player']]
+            context['player_msg'].edit_media(
+                media = InputMediaPhoto(
+                    self.visualise_board(),
+                    caption = '\n'.join(new_text),
+                    filename = f'chess-{self.id}.jpg'
+                ),
+                reply_markup = self._keyboard(figure_buttons, context['player'].id, head_button = True)
+            )
         
         elif args[0] == 'SURRENDER':
             self.finished = True
-            gif = self.to_gif()
-            return [{
-                **self.last_msg['player'],
-                'msg_id': self.ids[context['player_chat']],
-                'img': None,
-                'gif': gif,
-                'text': f"Игра окончена: {context['player'].name} сдался.\nХодов: {self.turn - 1}.\nПобедитель: {context['opponent'].name}.",
-                'answers': []
-            }, {
-                **self.last_msg['opponent'],
-                'msg_id': self.ids.get(context['opponent_chat']),
-                'img': None,
-                'gif': gif,
-                'text': f"Игра окончена: {context['player'].name} сдался.\nХодов: {self.turn - 1}.\nПобедитель: {context['opponent'].name}.",
-                'answers': []
-            }]
+            video = self.get_video()
+            for msg in [self.msg1, self.msg2]:
+                if msg:
+                    msg.edit_media(
+                        media = InputMediaVideo(
+                            video,
+                            caption = f"Игра окончена: {context['player'].name} сдался.\nХодов: {self.turn - 1}.\nПобедитель: {context['opponent'].name}.",
+                            filename = f'chess-{self.id}.mp4'
+                        )
+                    )
             
-        
         elif args[0] == 'CHOOSE_FIGURE':
-            dest_buttons = [[{'text': 'Назад', 'callback_data': ['TURN']}]]
+            dest_buttons = [{'text': 'Назад', 'data': ['TURN']}]
             figure = self[args[1]]
             moves = list(filter(lambda move: figure.is_legal(move['pos']), figure.get_moves()))
             for move in moves:
                 if type(figure) == Pawn and move['pos'][1] == (7 if figure.is_white else 0):
-                    dest_buttons.append([{'text': ('❌⏫' if move['killing'] else '⏫')+encode_pos(move['pos']),
-                                          'callback_data': ['PROMOTION_MENU', args[1], move['pos']]}])
+                    dest_buttons.append({'text': ('❌⏫' if move['killing'] else '⏫')+encode_pos(move['pos']),
+                                          'data': ['PROMOTION_MENU', args[1], move['pos']]})
                 else:
-                    dest_buttons.append([{'text': ('❌' if move['killing'] else '')+encode_pos(move['pos']),
-                                          'callback_data': ['MOVE', args[1], move['pos']]}])
-            new_text = self.last_msg['player']['text'].split('\n')
+                    dest_buttons.append({'text': ('❌' if move['killing'] else '')+encode_pos(move['pos']),
+                                          'data': ['MOVE', args[1], move['pos']]})
+                                          
+            new_text = self.init_msg_text.split('\n')
             new_text[-1] = f"Выберите новое место фигуры:"
             
-            self.last_msg['player'] = {
-                **self.last_msg['player'],
-                'img': self.visualise_board(selected = args[1], pointers = moves),
-                'text': '\n'.join(new_text),
-                'answers': dest_buttons
-            }
-            
-            return [self.last_msg['player']]
+            context['player_msg'].edit_media(
+                media = InputMediaPhoto(
+                    self.visualise_board(selected = args[1], pointers = moves),
+                    caption = '\n'.join(new_text),
+                    filename = f'chess-{self.id}.jpg'
+                ),
+                reply_markup = self._keyboard(dest_buttons, context['player'].id, head_button = True)
+            )
             
         elif args[0] == 'PROMOTION_MENU':
             figures = [
-                [{'text': 'Ферзь', 'callback_data': ['PROMOTION', args[1], args[2], 'q']}],
-                [{'text': 'Конь', 'callback_data': ['PROMOTION', args[1], args[2], 'n']}],
-                [{'text': 'Слон', 'callback_data': ['PROMOTION', args[1], args[2], 'b']}],
-                [{'text': 'Ладья', 'callback_data': ['PROMOTION', args[1], args[2], 'r']}]
+                {'text': 'Ферзь', 'data': ['PROMOTION', args[1], args[2], 'q']},
+                {'text': 'Конь', 'data': ['PROMOTION', args[1], args[2], 'n']},
+                {'text': 'Слон', 'data': ['PROMOTION', args[1], args[2], 'b']},
+                {'text': 'Ладья', 'data': ['PROMOTION', args[1], args[2], 'r']}
             ]
-            new_text = self.last_msg['player']['text'].split('\n')
+            
+            new_text = self.init_msg_text.split('\n')
             new_text[-1] = f"Выберите фигуру, в которую првератится пешка:"
             
-            self.last_msg['player'] = {
-                **self.last_msg,
-                'img': self.visualise_board(selected = args[1], special = [{'pos': args[2], 'killing': False}]),
-                'text': '\n'.join(new_text),
-                'answers': figures
-            }
-            
-            return [self.last_msg['player']]
+            context['player_msg'].edit_media(
+                media = InputMediaPhoto(
+                    self.visualise_board(selected = args[1], special = [{'pos': args[2], 'killing': False}]),
+                    caption = '\n'.join(new_text),
+                    filename = f'chess-{self.id}.jpg'
+                ),
+                reply_markup = self._keyboard(figures, context['player'].id)
+            )
             
         elif args[0] == 'PROMOTION':
             return self.init_turn(move = args[1:3], promotion = args[3])
@@ -769,22 +810,21 @@ class AIMatch(PMMatch):
     def init_turn(self, setup = False, **kwargs):
         context = self.get_context()
         if setup:
-            return [{
-                'chat_id': self.chat_id1,
-                'text': 'Выберите уровень сложности:',
-                'img': self.visualise_board(fen = STARTPOS),
-                'expected_uid': self.player1.id,
-                'answers': [
-                    [{'text': 'Низкий', 'callback_data': ['SKILL_LEVEL', '1350']}],
-                    [{'text': 'Средний', 'callback_data': ['SKILL_LEVEL', '1850']}],
-                    [{'text': 'Высокий', 'callback_data': ['SKILL_LEVEL', '2350']}],
-                    [{'text': 'Легендарный', 'callback_data': ['SKILL_LEVEL', '2850']}]
-                ]
-            }]
+            self.msg1 = self.bot.send_photo(
+                self.chat_id1,
+                self.visualise_board(fen = STARTPOS),
+                caption = 'Выберите уровень сложности:',
+                reply_markup = self._keyboard([
+                    {'text': 'Низкий', 'data': ['SKILL_LEVEL', '1350']},
+                    {'text': 'Средний', 'data': ['SKILL_LEVEL', '1850']},
+                    {'text': 'Высокий', 'data': ['SKILL_LEVEL', '2350']},
+                    {'text': 'Легендарный', 'data': ['SKILL_LEVEL', '2850']}
+                ], self.player1.id)
+            )
         
         else:
             turn_info = BaseMatch.init_turn(self, **kwargs)
-            if turn_info['player_gamestate'] == 'checkmate':
+            if self.finished:
                 return super().init_turn(turn_info = turn_info)
             
             self.engine_api.stdin.write(f'position fen {self.states[-1]}\n')

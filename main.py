@@ -21,44 +21,6 @@ def avoid_spam(f):
             group_thread._queue.put((f, (update, context), {}))
         
     return decorated
-
-def update_ui(bot, data, match_id):
-    msg_ids = {}
-    for msg in data:
-        if msg['chat_id'] == 0:
-            continue
-        reply_markup = []
-        for row in msg.get('answers', []):
-            reply_markup.append([tg.InlineKeyboardButton(text = i['text'],
-                                callback_data = {'target_id': match_id,
-                                        'expected_uid': msg.get('expected_uid'),
-                                        'args': i['callback_data']}) for i in row])
-        reply_markup = tg.InlineKeyboardMarkup(reply_markup) if reply_markup else None
-        
-        if msg.get('msg_id'):
-            if msg.get('img'):
-                bot.edit_message_media(chat_id = msg['chat_id'], message_id = msg['msg_id'],
-                                       media = tg.InputMediaPhoto(msg['img'], caption = msg.get('text', '')),
-                                       reply_markup = reply_markup)
-            elif msg.get('gif'):
-                bot.edit_message_media(chat_id = msg['chat_id'], message_id = msg['msg_id'],
-                                       media = tg.InputMediaAnimation(msg['gif'], caption = msg.get('text', '')),
-                                       reply_markup = reply_markup)
-            else:
-                bot.edit_message_text(chat_id = msg['chat_id'], message_id = msg['msg_id'],
-                                      text = msg['text'],
-                                      reply_markup = reply_markup)
-                
-        else:
-            if msg.get('img'):
-                msg = bot.send_photo(msg['chat_id'], msg['img'], caption = msg.get('text', ''), reply_markup = reply_markup)
-            elif msg.get('gif'):
-                msg = bot.send_photo(msg['chat_id'], msg['gif'], caption = msg.get('text', ''), reply_markup = reply_markup)
-            else:
-                msg = bot.send_message(msg['chat_id'], msg['text'], reply_markup = reply_markup)
-                
-            msg_ids[msg['chat_id']] = msg.message_id
-    return msg_ids
             
 defaults = tg_ext.Defaults(quote = True)
 updater = tg_ext.Updater(token=os.environ["BOT_TOKEN"], use_context=True, defaults = defaults,
@@ -111,28 +73,27 @@ def button_callback(update, context):
         elif args['command'] == 'NEW':
             if args['mode'] == 'AI':
                 update.effective_message.edit_text('Игра найдена')
-                new = getattr(boardgame_api, args['game']).AIMatch(update.effective_user, update.effective_chat)
+                new = getattr(boardgame_api, args['game']).AIMatch(update.effective_user, update.effective_chat, bot = context.bot)
                 context.bot_data['matches'][new.id] = new
-                
-                msg_ids = update_ui(context.bot, new.init_turn(setup = True), new.id)
-                context.bot_data['matches'][new.id].ids.update(msg_ids)
+                new.init_turn(setup = True)
                 
             elif len(context.bot_data['queue'][args['game']]) > 0:
                 queued_user, queued_chat, queued_msg = context.bot_data['queue'][args['game']].pop(0)
                 if queued_chat == update.effective_chat:
                     new = getattr(boardgame_api, args['game']).GroupMatch(queued_user,
                                             update.effective_user,
-                                            update.effective_chat.id)
+                                            update.effective_chat.id,
+                                            bot = context.bot)
                 else:
                     new = getattr(boardgame_api, args['game']).PMMatch(queued_user,
                                             update.effective_user,
                                             queued_chat.id,
-                                            update.effective_chat.id)
+                                            update.effective_chat.id,
+                                            bot = context.bot)
                 queued_msg.edit_text(text = 'Игра найдена')
                 update.effective_message.edit_text(text = 'Игра найдена')
                 context.bot_data['matches'][new.id] = new
-                msg_ids = update_ui(context.bot, new.init_turn(), new.id)
-                context.bot_data['matches'][new.id].ids = msg_ids
+                new.init_turn()
             else:
                 keyboard = tg.InlineKeyboardMarkup([[tg.InlineKeyboardButton(text = 'Отмена', 
                                                                     callback_data = {'target_id': 'MAIN',
@@ -152,11 +113,10 @@ def button_callback(update, context):
                 
     else:
         res = context.bot_data['matches'][args['target_id']].handle_input(args['args'])
-        msg_ids = update_ui(context.bot, res, args['target_id'])
-        context.bot_data['matches'][args['target_id']].ids.update(msg_ids)
+        res = res if res else (None, False)
         if context.bot_data['matches'][args['target_id']].finished:
             del context.bot_data['matches'][args['target_id']]
-        update.callback_query.answer()
+        update.callback_query.answer(text = res[0], show_alert = res[1])
 updater.dispatcher.add_handler(tg_ext.CallbackQueryHandler(button_callback))
             
 updater.bot.send_message(chat_id=os.environ['CREATOR_ID'], text='Бот включен')
