@@ -438,6 +438,9 @@ class BaseMatch():
             for i in range(15):
                 writer.write(img_array)
         
+        for i in range(15):
+            writer.write(img_array)
+        
         writer.release()
         data = open(path, 'rb').read()
         os.remove(path)
