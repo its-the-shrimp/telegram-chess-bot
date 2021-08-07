@@ -10,6 +10,11 @@ if os.path.exists('debug_env.json'):
     with open('debug_env.json') as r:
         os.environ.update(json.load(r))
 
+try:
+    os.mkdir(os.path.join('images', 'temp'))
+except FileExistsError:
+    pass
+
 group_thread = tg_ext.DelayQueue()
 pm_thread = tg_ext.DelayQueue()
 
