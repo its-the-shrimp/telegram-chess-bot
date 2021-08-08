@@ -427,8 +427,8 @@ class BaseMatch():
             return board.convert(mode = 'RGB')
         
     def get_video(self):
-        path = os.path.join('images', 'temp', f'chess-{self.id}.avi')
-        writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'XVID'), 15.0, (500, 500))
+        path = os.path.join('images', 'temp', f'chess-{self.id}.mp4')
+        writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), 15.0, (500, 500))
         
         for fen in self.states:
             img = self.visualise_board(fen = fen, return_bytes = False)
