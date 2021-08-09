@@ -6,6 +6,7 @@ import telegram.ext
 import random
 import boardgame_api
 import bot_utils
+import difflib
 
 if os.path.exists("debug_env.json"):
     import logging
@@ -83,7 +84,13 @@ def start(update, context):
 
 @avoid_spam
 def unknown(update, context):
-    update.effective_message.reply_text("Неизвестная команда")
+    ratios = []
+    d = difflib.SequenceMatcher(a = update.effective_message.text)
+    for command, _ in commands:
+        d.set_seq2(command)
+        ratios.append((d.ratio(), command))
+    suggested = max(ratios, key = lambda x: x[0])[1]
+    update.effective_message.reply_text(f"Неизвестная команда. Может, вы имели ввиду {suggested}?")
 
 
 @avoid_spam
