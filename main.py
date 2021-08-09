@@ -2,11 +2,16 @@ import os
 import os.path
 import json
 import telegram as tg
-import telegram.ext as tg_ext
+import telegram.ext
 import random
 import boardgame_api
+import bot_utils
 
 if os.path.exists("debug_env.json"):
+    import logging
+
+    logging.basicConfig(format="%(asctime)s %(message)s", level=logging.DEBUG)
+
     with open("debug_env.json") as r:
         os.environ.update(json.load(r))
 
@@ -15,12 +20,13 @@ try:
 except FileExistsError:
     pass
 
-group_thread = tg_ext.DelayQueue()
-pm_thread = tg_ext.DelayQueue()
+group_thread = tg.ext.DelayQueue()
+pm_thread = tg.ext.DelayQueue()
 
 
 def avoid_spam(f):
     def decorated(update, context):
+        context.db.sadd("user-ids", str(update.effective_user.id).encode())
         if update.effective_chat.type == "private":
             pm_thread._queue.put((f, (update, context), {}))
         else:
@@ -29,20 +35,81 @@ def avoid_spam(f):
     return decorated
 
 
-defaults = tg_ext.Defaults(quote=True)
-updater = tg_ext.Updater(
+def stop_bot(*args):
+    group_thread.stop()
+    pm_thread.stop()
+    exit()
+
+
+def serialize_bot_data(self):
+    self.bot_data["matches"] = {
+        k: v.to_dict() for k, v in self.bot_data["matches"].items()
+    }
+
+
+commands = [
+    ("/play", "Играть в шахматы"),
+    ("/settings", "Настройки бота, такие как анонимный режим и др."),
+]
+updater = tg.ext.Updater(
     token=os.environ["BOT_TOKEN"],
     use_context=True,
-    defaults=defaults,
+    defaults=tg.ext.Defaults(quote=True),
     arbitrary_callback_data=True,
+    persistence=bot_utils.RedisPersistence(
+        url=os.environ["REDISCLOUD_URL"],
+        store_callback_data=True,
+        preprocessor=serialize_bot_data,
+    ),
+    context_types=tg.ext.ContextTypes(context=bot_utils.RedisContext),
+    user_sig_handler=stop_bot,
 )
-updater.dispatcher.bot_data = {"queue": {"chess": []}, "matches": {}}
+if not updater.dispatcher.bot_data:
+    updater.dispatcher.bot_data = {"queue": {"chess": []}, "matches": {}}
+else:
+    updater.dispatcher.bot_data["matches"] = {
+        k: boardgame_api.chess.from_dict(v, k, updater.bot)
+        for k, v in updater.dispatcher.bot_data["matches"].items()
+    }
+boardgame_api.chess.BaseMatch.db = updater.persistence.conn
 
 
 @avoid_spam
 def start(update, context):
     update.effective_chat.send_message(
         text="Привет! Чтобы сыграть, введи команду /play"
+    )
+
+
+@avoid_spam
+def unknown(update, context):
+    update.effective_message.reply_text("Неизвестная команда")
+
+
+@avoid_spam
+def settings(update, context):
+    is_anon = context.db.is_anon(update.effective_user)
+    update.effective_message.reply_text(
+        """
+Опции:
+    <i>Анонимный режим</i>: Бот не будет оставлять ваше имя пользователя (начинающееся с @)
+        в сообщениях и во вложениях к ним.
+    """,
+        parse_mode=tg.ParseMode.HTML,
+        reply_markup=tg.InlineKeyboardMarkup(
+            [
+                [
+                    tg.InlineKeyboardButton(
+                        text=f'Анонимный режим: {"🟢" if is_anon else "🔴"}',
+                        callback_data={
+                            "target_id": "MAIN",
+                            "expected_uid": update.effective_user.id,
+                            "command": "ANON_MODE_OFF" if is_anon else "ANON_MODE_ON",
+                        },
+                    )
+                ]
+            ]
+        ),
     )
 
 
@@ -72,7 +139,7 @@ def boardgame_menu(update, context):
 def button_callback(update, context):
     args = update.callback_query.data
 
-    if type(args) == tg_ext.InvalidCallbackData:
+    if type(args) == tg.ext.InvalidCallbackData:
         update.callback_query.answer("Ошибка: информация о сообщении не найдена.")
         return
 
@@ -89,6 +156,44 @@ def button_callback(update, context):
     if args["target_id"] == "MAIN":
         if args["command"] == "NA":
             update.callback_query.answer(text="Недоступно", show_alert=True)
+        elif args["command"] == "ANON_MODE_OFF":
+            context.db.anon_mode_off(update.effective_user)
+            update.callback_query.answer("Анонимный режим отключен", show_alert=True)
+            update.effective_message.edit_reply_markup(
+                tg.InlineKeyboardMarkup(
+                    [
+                        [
+                            tg.InlineKeyboardButton(
+                                text=f'Анонимный режим: {"🟢" if context.db.is_anon(update.effective_user) else "🔴"}',
+                                callback_data={
+                                    "target_id": "MAIN",
+                                    "expected_uid": update.effective_user.id,
+                                    "command": "ANON_MODE_ON",
+                                },
+                            )
+                        ]
+                    ]
+                )
+            )
+        elif args["command"] == "ANON_MODE_ON":
+            context.db.anon_mode_on(update.effective_user)
+            update.callback_query.answer("Анонимный режим включен", show_alert=True)
+            update.effective_message.edit_reply_markup(
+                tg.InlineKeyboardMarkup(
+                    [
+                        [
+                            tg.InlineKeyboardButton(
+                                text=f'Анонимный режим: {"🟢" if context.db.is_anon(update.effective_user) else "🔴"}',
+                                callback_data={
+                                    "target_id": "MAIN",
+                                    "expected_uid": update.effective_user.id,
+                                    "command": "ANON_MODE_OFF",
+                                },
+                            )
+                        ]
+                    ]
+                )
+            )
         elif args["command"] == "CHOOSE_MODE":
             keyboard = tg.InlineKeyboardMarkup(
                 [
@@ -114,7 +219,7 @@ def button_callback(update, context):
             if args["mode"] == "AI":
                 update.effective_message.edit_text("Игра найдена")
                 new = getattr(boardgame_api, args["game"]).AIMatch(
-                    update.effective_user, update.effective_chat, bot=context.bot
+                    update.effective_user, update.effective_chat.id, bot=context.bot
                 )
                 context.bot_data["matches"][new.id] = new
                 new.init_turn(setup=True)
@@ -183,11 +288,20 @@ def button_callback(update, context):
         update.callback_query.answer(text=res[0], show_alert=res[1])
 
 
-if __name__ == "__main__":
-    updater.dispatcher.add_handler(tg_ext.CommandHandler("start", start))
-    updater.dispatcher.add_handler(tg_ext.CommandHandler("play", boardgame_menu))
-    updater.dispatcher.add_handler(tg_ext.CallbackQueryHandler(button_callback))
+def main():
+    updater.dispatcher.add_handler(tg.ext.CallbackQueryHandler(button_callback))
+    updater.dispatcher.add_handler(tg.ext.CommandHandler("start", start))
+    updater.dispatcher.add_handler(tg.ext.CommandHandler("play", boardgame_menu))
+    updater.dispatcher.add_handler(tg.ext.CommandHandler("settings", settings))
+    updater.dispatcher.add_handler(
+        tg.ext.MessageHandler(tg.ext.filters.Filters.regex("^/"), unknown)
+    )
+    updater.bot.set_my_commands(commands)
 
     updater.bot.send_message(chat_id=os.environ["CREATOR_ID"], text="Бот включен")
     updater.start_polling(drop_pending_updates=True)
     updater.idle()
+
+
+if __name__ == "__main__":
+    main()
