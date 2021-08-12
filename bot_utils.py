@@ -1,37 +1,54 @@
 import redis
-import telegram as tg
-import telegram.ext
+from telegram.ext import DictPersistence, CallbackContext
+import logging
 
 
 class RedisInterface(redis.Redis):
-    def is_anon(self, user: tg.User) -> bool:
+    def is_anon(self, user) -> bool:
         return bool(self.exists(f"user-{user.id}:isanon"))
 
-    def get_name(self, user: tg.User) -> str:
+    def get_name(self, user) -> str:
         if self.is_anon(user):
-            return user.full_name
+            return f"player{user.id}"
         else:
             return user.name
 
-    def anon_mode_off(self, user: tg.User) -> None:
+    def anon_mode_off(self, user) -> None:
         self.delete(f"user-{user.id}:isanon")
 
-    def anon_mode_on(self, user: tg.User) -> None:
+    def anon_mode_on(self, user) -> None:
         self.set(f"user-{user.id}:isanon", b"1")
 
 
-class RedisPersistence(tg.ext.DictPersistence):
-    USER_DATA = "ptb:user-data"
-    CHAT_DATA = "ptb:chat-data"
-    BOT_DATA = "ptb:bot-data"
-    CALLBACK_DATA = "ptb:callback-data"
-    CONVERSATIONS = "ptb:conversations"
+class RedisPersistence(DictPersistence):
+    USER_DATA = "ptb:{token}:user-data"
+    CHAT_DATA = "ptb:{token}:chat-data"
+    BOT_DATA = "ptb:{token}:bot-data"
+    CALLBACK_DATA = "ptb:{token}:callback-data"
+    CONVERSATIONS = "ptb:{token}:conversations"
+
+    @staticmethod
+    def default_decoder(self, obj):
+        return {k: v.decode() for k, v in obj.items()}
+
+    @staticmethod
+    def default_encoder(self, obj):
+        return {
+            "bot_data": self.bot_data_json.encode(),
+            "chat_data": self.chat_data_json.encode(),
+            "user_data": self.user_data_json.encode(),
+            "callback_data": self.callback_data_json.encode(),
+            "conversations": self.conversations_json.encode()
+            if self.conversations
+            else b"",
+        }
 
     def __init__(
         self,
         url: str = None,
         db: RedisInterface = None,
-        preprocessor=lambda self: None,
+        decoder=None,
+        encoder=None,
         **kwargs,
     ) -> None:
 
@@ -42,41 +59,66 @@ class RedisPersistence(tg.ext.DictPersistence):
         else:
             raise ValueError("Either 'url' or 'db' argument must be specified")
 
+        self.decoder = decoder if decoder else self.default_decoder
+        self.encoder = encoder if encoder else self.default_encoder
+        self._init_kwargs = kwargs
+
+    def set_bot(self, bot):
+        obj = {}
+        logging.debug("Fetching persistence data from the database...")
+        for key in [
+            "USER_DATA",
+            "CHAT_DATA",
+            "BOT_DATA",
+            "CALLBACK_DATA",
+            "CONVERSATIONS",
+        ]:
+            setattr(self, key, getattr(self, key).format(token=bot.token))
+            if self._init_kwargs.get(f"store_{key.lower()}", True):
+                obj[key.lower()] = (
+                    self.conn.get(getattr(self, key))
+                    if self.conn.exists(getattr(self, key))
+                    else b""
+                )
+                logging.debug(
+                    f"{getattr(self, key)}({round(len(obj[key.lower()])/1024, 2)}Kb): {obj[key.lower()]}"
+                )
+
+        obj = self.decoder(self, obj)
         super().__init__(
-            **kwargs,
-            user_data_json=self.conn.get(self.USER_DATA).decode()
-            if self.conn.exists(self.USER_DATA)
-            else "",
-            chat_data_json=self.conn.get(self.CHAT_DATA).decode()
-            if self.conn.exists(self.CHAT_DATA)
-            else "",
-            bot_data_json=self.conn.get(self.BOT_DATA).decode()
-            if self.conn.exists(self.BOT_DATA)
-            else "",
-            callback_data_json=self.conn.get(self.CALLBACK_DATA).decode()
-            if self.conn.exists(self.CALLBACK_DATA)
-            else "",
-            conversations_json=self.conn.get(self.CONVERSATIONS).decode()
-            if self.conn.exists(self.CONVERSATIONS)
-            else "",
+            **self._init_kwargs,
+            user_data_json=obj.get("user_data"),
+            chat_data_json=obj.get("chat_data"),
+            bot_data_json=obj.get("bot_data"),
+            callback_data_json=obj.get("callback_data"),
+            conversations_json=obj.get("conversations"),
         )
-        self.preprocessor = preprocessor
+        super().set_bot(bot)
+        del self._init_kwargs
 
     def flush(self) -> None:
-        self.preprocessor(self)
-        if self.store_bot_data:
-            self.conn.set(self.BOT_DATA, self.bot_data_json.encode())
-        if self.store_chat_data:
-            self.conn.set(self.CHAT_DATA, self.chat_data_json.encode())
-        if self.store_user_data:
-            self.conn.set(self.USER_DATA, self.user_data_json.encode())
-        if self.store_callback_data:
-            self.conn.set(self.CALLBACK_DATA, self.callback_data_json.encode())
-        if self._conversations_json or self._conversations:
-            self.conn.set(self.CONVERSATIONS, self.conversations_json.encode())
+        logging.debug("Flushing data to the database...")
+        obj = {
+            k: getattr(self, k)
+            for k in [
+                "chat_data",
+                "bot_data",
+                "user_data",
+                "callback_data",
+                "conversations",
+            ]
+        }
+        obj = self.encoder(self, obj)
+
+        for k, v in obj.items():
+            if getattr(self, f"store_{k}", True):
+                self.conn[getattr(self, k.upper())] = v
+                logging.debug(
+                    f"{getattr(self, k.upper())}({round(len(obj[k.lower()])/1024, 2)}Kb): {v}"
+                )
 
 
-class RedisContext(tg.ext.CallbackContext):
+class RedisContext(CallbackContext):
     @property
     def db(self):
         return self.dispatcher.persistence.conn

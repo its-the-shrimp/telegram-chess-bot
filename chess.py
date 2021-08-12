@@ -1,8 +1,6 @@
-import PIL.Image
 import itertools
 import random
 import subprocess
-import io
 import os.path
 from telegram import (
     InlineKeyboardMarkup,
@@ -13,6 +11,7 @@ from telegram import (
     Message,
 )
 import cv2
+import cv_utils
 import numpy
 
 IDSAMPLE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-+"
@@ -28,10 +27,36 @@ FENSYMBOLS = {
 IMAGES = {}
 for name in ["Pawn", "King", "Bishop", "Rook", "Queen", "Knight"]:
     IMAGES[name] = [
-        PIL.Image.open(f"images/chess/{color}_{name.lower()}.png")
+        cv2.imread(f"images/chess/{color}_{name.lower()}.png", cv2.IMREAD_UNCHANGED)
         for color in ["black", "white"]
     ]
-STARTPOS = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+STARTPOS = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 - -"
+POINTER_COLORS = {"normal": "#00cc36", "killing": "cc0000", "special": "#3ba7ff"}
+BOARD_IMG = cv2.imread("images/chess/board.png", cv2.IMREAD_UNCHANGED)
+
+POINTER_IMG = numpy.zeros((50, 50, 4), dtype=numpy.uint8)
+width = POINTER_IMG.shape[0] // 2
+for row in range(POINTER_IMG.shape[0]):
+    for column in range(POINTER_IMG.shape[1]):
+        if abs(row - width) + abs(column - width) > round(width * 1.5):
+            POINTER_IMG[row][column] = cv_utils.from_hex(POINTER_COLORS["normal"]) + [
+                255
+            ]
+        elif abs(row - width) + abs(column - width) == round(width * 1.5):
+            POINTER_IMG[row][column] = cv_utils.from_hex(POINTER_COLORS["normal"]) + [
+                127
+            ]
+INCOMING_POINTER_IMG = numpy.zeros((50, 50, 4), dtype=numpy.uint8)
+for row in range(INCOMING_POINTER_IMG.shape[0]):
+    for column in range(INCOMING_POINTER_IMG.shape[1]):
+        if abs(row - width) + abs(column - width) < round(width * 0.5):
+            INCOMING_POINTER_IMG[row][column] = cv_utils.from_hex(
+                POINTER_COLORS["normal"]
+            ) + [255]
+        elif abs(row - width) + abs(column - width) == round(width * 0.5):
+            INCOMING_POINTER_IMG[row][column] = cv_utils.from_hex(
+                POINTER_COLORS["normal"]
+            ) + [127]
 
 
 def _group_buttons(obj, n, head_button=False):
@@ -58,9 +83,9 @@ def _short_dict(obj):
     return obj
 
 
-def _fentoimagemap(fen):
+def decode_fen(fen):
     res = {}
-    fen = fen[: fen.find(" ")].split("/")
+    fen = fen.split("/")
     for line in range(8):
         offset = 0
         for column in range(8):
@@ -70,15 +95,20 @@ def _fentoimagemap(fen):
             if char.isdigit():
                 offset += int(char) - 1
             else:
-                res[(column + offset, 7 - line)] = IMAGES[FENSYMBOLS[char.lower()]][
-                    char.isupper()
-                ]
+                res[(column + offset, 7 - line)] = char
 
     return res
 
 
-def _imgpos(pos):
-    return [19 + 60 * pos[0] - pos[0] // 2, 422 - 59 * pos[1]]
+def fen_diff(src, dst):
+    src = decode_fen(src).keys()
+    dst = decode_fen(dst).keys()
+    res = []
+    for pos in src:
+        if pos not in dst:
+            res.append(list(pos))
+
+    return res
 
 
 def decode_pos(pos):
@@ -94,7 +124,6 @@ def in_bounds(pos):
 
 
 def from_dict(obj, match_id, bot):
-    print(obj)
     player1 = User.de_json(obj["player1"], bot)
     msg = Message.de_json(obj["msg"], bot)
     if "player2" in obj:
@@ -234,13 +263,18 @@ class Pawn(BaseFigure):
         moves = []
         for move in positions:
             if in_bounds(move) and move not in [i.pos for i in allies]:
-                moves.append(
-                    {
-                        "pos": move,
-                        "killing": move
-                        in [i.pos for i in enemies] + [self.match.enpassant_pos[1]],
-                    }
-                )
+                if move[1] in [0, 7]:
+                    moves.append({"pos": move, "type": "special"})
+                else:
+                    moves.append(
+                        {
+                            "pos": move,
+                            "type": "killing"
+                            if move
+                            in [i.pos for i in enemies] + [self.match.enpassant_pos[1]]
+                            else "normal",
+                        }
+                    )
 
         return moves
 
@@ -279,8 +313,10 @@ class Knight(BaseFigure):
                 moves.append(
                     {
                         "pos": move,
-                        "killing": move
-                        in [i.pos for i in enemies] + [self.match.enpassant_pos[1]],
+                        "type": "killing"
+                        if move
+                        in [i.pos for i in enemies] + [self.match.enpassant_pos[1]]
+                        else "normal",
                     }
                 )
 
@@ -309,10 +345,10 @@ class Rook(BaseFigure):
                 if move in [i.pos for i in allies] or not in_bounds(move):
                     break
                 elif move in [i.pos for i in enemies] + [self.match.enpassant_pos[1]]:
-                    moves.append({"pos": move, "killing": True})
+                    moves.append({"pos": move, "type": "killing"})
                     break
                 else:
-                    moves.append({"pos": move, "killing": False})
+                    moves.append({"pos": move, "type": "normal"})
 
         return moves
 
@@ -339,11 +375,10 @@ class Bishop(BaseFigure):
                 if move in [i.pos for i in allies] or not in_bounds(move):
                     break
                 elif move in [i.pos for i in enemies] + [self.match.enpassant_pos[1]]:
-                    moves.append({"pos": move, "killing": True})
+                    moves.append({"pos": move, "type": "killing"})
                     break
                 else:
-                    moves.append({"pos": move, "killing": False})
-
+                    moves.append({"pos": move, "type": "normal"})
         return moves
 
 
@@ -373,8 +408,10 @@ class King(BaseFigure):
                     moves.append(
                         {
                             "pos": move,
-                            "killing": move
-                            in [i.pos for i in enemies] + [self.match.enpassant_pos[1]],
+                            "type": "killing"
+                            if move
+                            in [i.pos for i in enemies] + [self.match.enpassant_pos[1]]
+                            else "normal",
                         }
                     )
         if not self.moved and not self.in_check():
@@ -386,13 +423,13 @@ class King(BaseFigure):
                 and a_rook
                 and not a_rook.moved
             ):
-                moves.append({"pos": [2, Y], "killing": False})
+                moves.append({"pos": [2, Y], "type": "special"})
             if (
                 all([not self.match[[x, Y]] or for_fen for x in [5, 6]])
                 and h_rook
                 and not h_rook.moved
             ):
-                moves.append({"pos": [6, Y], "killing": False})
+                moves.append({"pos": [6, Y], "type": "special"})
         return moves
 
     def in_checkmate(self):
@@ -425,8 +462,6 @@ class King(BaseFigure):
 
 
 class BaseMatch:
-    BOARD_IMG = PIL.Image.open("images/chess/board.png")
-    POINTER_IMG = PIL.Image.open("images/chess/pointer.png")
     WRONG_PERSON_MSG = "Сейчас не ваш ход!"
     db = None
 
@@ -439,6 +474,7 @@ class BaseMatch:
         self.id = "".join(random.choices(IDSAMPLE, k=8))
         self.image_filename = f"chess-{self.id}.jpg"
         self.video_filename = f"chess-{self.id}.mp4"
+        self.check_indexes = []
         (
             board,
             self.is_white_turn,
@@ -446,6 +482,8 @@ class BaseMatch:
             self.enpassant_pos,
             self.empty_halfturns,
             self.turn,
+            check_pos,
+            prev_pos_iter,
         ) = [int(i) - 1 if i.isdigit() else i for i in fen.split(" ")]
 
         self.is_white_turn = self.is_white_turn != "w"
@@ -459,38 +497,27 @@ class BaseMatch:
                 self.enpassant_pos,
             ]
 
-        board = board.split("/")
-        for line in range(8):
-            offset = 0
-            for column in range(8):
-                if column + offset > 7:
-                    break
-                char = board[line][column]
-                if char.isdigit():
-                    offset += int(char) - 1
-                else:
-                    new = eval(FENSYMBOLS[char.lower()])(
-                        [column + offset, 7 - line], self, char.isupper()
-                    )
-                    K = "K" if new.is_white else "k"
-                    Q = "Q" if new.is_white else "q"
-                    if type(new) == King and K not in castlings and Q not in castlings:
-                        new.moved = True
-                    elif (
-                        type(new) == Rook
-                        and K not in castlings
-                        and Q in castlings
-                        and new.pos != [0, 0 if new.is_white else 7]
-                    ):
-                        new.moved = True
-                    elif (
-                        type(new) == Rook
-                        and K in castlings
-                        and Q not in castlings
-                        and new.pos != [7, 0 if new.is_white else 7]
-                    ):
-                        new.moved = True
-                    getattr(self, "whites" if new.is_white else "blacks").append(new)
+        for (column, line), char in decode_fen(board).items():
+            new = eval(FENSYMBOLS[char.lower()])([column, line], self, char.isupper())
+            K = "K" if new.is_white else "k"
+            Q = "Q" if new.is_white else "q"
+            if type(new) == King and K not in castlings and Q not in castlings:
+                new.moved = True
+            elif (
+                type(new) == Rook
+                and K not in castlings
+                and Q in castlings
+                and new.pos != [0, 0 if new.is_white else 7]
+            ):
+                new.moved = True
+            elif (
+                type(new) == Rook
+                and K in castlings
+                and Q not in castlings
+                and new.pos != [7, 0 if new.is_white else 7]
+            ):
+                new.moved = True
+            getattr(self, "whites" if new.is_white else "blacks").append(new)
 
     def __getitem__(self, key):
         for figure in self.whites + self.blacks:
@@ -608,65 +635,74 @@ class BaseMatch:
         return turn_info
 
     def visualise_board(
-        self, selected=[None, None], pointers=[], fen="", special=[], return_bytes=True
+        self, selected=[None, None], pointers=[], fen="", return_bytes=True
     ):
-        board = self.BOARD_IMG.copy()
+        board = BOARD_IMG.copy()
         fen = fen if fen else self.states[-1]
+        fen_board, *_, check_pos, prev_pos_iter = fen.split(" ")
         selected = tuple(selected)
 
-        for pos, image in _fentoimagemap(fen).items():
-            board.paste(
-                "#00cc36" if pos == selected else image, box=_imgpos(pos), mask=image
-            )
+        for pos, char in decode_fen(fen_board).items():
+            image = IMAGES[FENSYMBOLS[char.lower()]][char.isupper()]
+            if pos == selected:
+                cv_utils.fill(
+                    cv_utils.from_hex("#00cc36"),
+                    board,
+                    topleft=cv_utils.image_pos(pos, image.shape[:2]),
+                    mask=image,
+                )
+            else:
+                cv_utils.paste(image, board, cv_utils.image_pos(pos, image.shape[:2]))
 
         for pointer in pointers:
-            board.paste(
-                "#cc0000" if pointer["killing"] else "#00cc36",
-                box=_imgpos(pointer["pos"]),
-                mask=self.POINTER_IMG,
+            cv_utils.fill(
+                cv_utils.from_hex(POINTER_COLORS[pointer["type"]]),
+                board,
+                topleft=cv_utils.image_pos(pointer["pos"], POINTER_IMG.shape[:2]),
+                mask=POINTER_IMG,
             )
 
-        for pointer in special:
-            board.paste(
-                "#cc0000" if pointer["killing"] else "#3ba7ff",
-                box=_imgpos(pointer["pos"]),
-                mask=self.POINTER_IMG,
+        if check_pos != "-":
+            cv_utils.fill(
+                cv_utils.from_hex(POINTER_COLORS["killing"]),
+                board,
+                topleft=cv_utils.image_pos(
+                    decode_pos(check_pos), INCOMING_POINTER_IMG.shape[:2]
+                ),
+                mask=INCOMING_POINTER_IMG,
             )
 
-        if return_bytes:
-            board = board.convert(mode="RGB")
-            buffer = io.BytesIO()
-            board.save(buffer, format="JPEG")
-            return buffer.getvalue()
-        else:
-            return board.convert(mode="RGB")
+        if prev_pos_iter != "-":
+            for move in prev_pos_iter.split("/"):
+                cv_utils.fill(
+                    cv_utils.from_hex(POINTER_COLORS["normal"]),
+                    board,
+                    topleft=cv_utils.image_pos(
+                        decode_pos(move), INCOMING_POINTER_IMG.shape[:2]
+                    ),
+                    mask=INCOMING_POINTER_IMG,
+                )
+
+        return cv2.imencode(".jpg", board)[1].tobytes() if return_bytes else board
 
     def get_video(self):
         path = os.path.join("images", "temp", self.video_filename)
         writer = cv2.VideoWriter(
-            path, cv2.VideoWriter_fourcc(*"mp4v"), 15.0, (500, 500)
+            path, cv2.VideoWriter_fourcc(*"mp4v"), 15.0, BOARD_IMG.shape[1::-1]
         )
 
         for fen in self.states:
-            img = self.visualise_board(fen=fen, return_bytes=False)
-            img_array = numpy.array(img.getdata(), dtype=numpy.uint8).reshape(
-                img.size[1], img.size[0], 3
-            )
-            temp = (img_array[:, :, 2].copy(), img_array[:, :, 0].copy())
-            img_array[:, :, 0], img_array[:, :, 2] = temp
+            img_array = self.visualise_board(fen=fen, return_bytes=False)
             for i in range(15):
                 writer.write(img_array)
-
         for i in range(15):
             writer.write(img_array)
-        img.thumbnail((200, 200))
-        thumb_buffer = io.BytesIO()
-        img.save(thumb_buffer, format="JPEG")
 
+        thumbnail = cv2.resize(img_array, None, fx=0.5, fy=0.5)
         writer.release()
         video_data = open(path, "rb").read()
         os.remove(path)
-        return video_data, thumb_buffer.getvalue()
+        return video_data, cv2.imencode(".jpg", thumbnail)[1].tobytes()
 
     def fen_string(self):
         res = [""] * 8
@@ -699,13 +735,22 @@ class BaseMatch:
                 res[-1] += "k"
             if [2, 7] in black_king_moves:
                 res[-1] += "q"
-        if white_king.moved and black_king.moved:
-            res[-1] += "-"
 
         res.append(encode_pos(self.enpassant_pos[1]) if self.enpassant_pos[0] else "-")
         res.append(str(self.empty_halfturns))
         res.append(str(self.turn))
-        return " ".join(res)
+
+        res.append("")
+        for king in [self.get_king(i) for i in (True, False)]:
+            if king.in_check():
+                res[-1] += encode_pos(king.pos)
+
+        print(self.states)
+        diff = fen_diff(self.states[-1].split(" ")[0], res[0]) if self.states else []
+        res.append("/".join([encode_pos(i) for i in diff]))
+        if not res[-1]:
+            res[-1] = "-"
+        return " ".join([(i if i else "-") for i in res])
 
 
 class GroupMatch(BaseMatch):
@@ -715,6 +760,14 @@ class GroupMatch(BaseMatch):
         self.chat_id = match_chat
         self.msg = None
         super().__init__(**kwargs)
+
+    @property
+    def players(self):
+        return (
+            (self.player1, self.player2)
+            if self.is_white_turn
+            else (self.player2, self.player1)
+        )
 
     def to_dict(self):
         res = super().to_dict()
@@ -775,10 +828,11 @@ class GroupMatch(BaseMatch):
                 player.id,
             )
             self.init_msg_text = msg
+            img = self.visualise_board()
             if self.msg:
                 self.msg = self.msg.edit_media(
                     media=InputMediaPhoto(
-                        self.visualise_board(),
+                        img,
                         caption=msg,
                         filename=self.image_filename,
                     ),
@@ -787,7 +841,7 @@ class GroupMatch(BaseMatch):
             else:
                 self.msg = self.bot.send_photo(
                     self.chat_id,
-                    self.visualise_board(),
+                    img,
                     caption=msg,
                     filename=self.image_filename,
                     reply_markup=keyboard,
@@ -855,20 +909,17 @@ class GroupMatch(BaseMatch):
                 filter(lambda move: figure.is_legal(move["pos"]), figure.get_moves())
             )
             for move in moves:
-                if type(figure) == Pawn and move["pos"][1] == (
-                    7 if figure.is_white else 0
-                ):
+                if move["type"] == "special":
                     dest_buttons.append(
                         {
-                            "text": ("❌⏫" if move["killing"] else "⏫")
-                            + encode_pos(move["pos"]),
+                            "text": "⏫" + encode_pos(move["pos"]),
                             "data": ["PROMOTION_MENU", args[1], move["pos"]],
                         }
                     )
                 else:
                     dest_buttons.append(
                         {
-                            "text": ("❌" if move["killing"] else "")
+                            "text": ("❌" if move["type"] == "killing" else "")
                             + encode_pos(move["pos"]),
                             "data": ["MOVE", args[1], move["pos"]],
                         }
@@ -902,7 +953,7 @@ class GroupMatch(BaseMatch):
             self.msg = self.msg.edit_media(
                 media=InputMediaPhoto(
                     self.visualise_board(
-                        selected=args[1], special=[{"pos": args[2], "killing": False}]
+                        selected=args[1], pointers=[{"pos": args[2], "type": "special"}]
                     ),
                     caption="\n".join(new_text),
                     filename=self.image_filename,
@@ -1136,20 +1187,17 @@ class PMMatch(BaseMatch):
                 filter(lambda move: figure.is_legal(move["pos"]), figure.get_moves())
             )
             for move in moves:
-                if type(figure) == Pawn and move["pos"][1] == (
-                    7 if figure.is_white else 0
-                ):
+                if move["type"] == "special":
                     dest_buttons.append(
                         {
-                            "text": ("❌⏫" if move["killing"] else "⏫")
-                            + encode_pos(move["pos"]),
+                            "text": "⏫" + encode_pos(move["pos"]),
                             "data": ["PROMOTION_MENU", args[1], move["pos"]],
                         }
                     )
                 else:
                     dest_buttons.append(
                         {
-                            "text": ("❌" if move["killing"] else "")
+                            "text": ("❌" if move["type"] == "killing" else "")
                             + encode_pos(move["pos"]),
                             "data": ["MOVE", args[1], move["pos"]],
                         }
@@ -1181,7 +1229,7 @@ class PMMatch(BaseMatch):
             self.player_msg = self.player_msg.edit_media(
                 media=InputMediaPhoto(
                     self.visualise_board(
-                        selected=args[1], special=[{"pos": args[2], "killing": False}]
+                        selected=args[1], pointers=[{"pos": args[2], "type": "special"}]
                     ),
                     caption="\n".join(new_text),
                     filename=self.image_filename,
@@ -1211,6 +1259,7 @@ class AIMatch(PMMatch):
         )
 
         self.engine_api.stdout.readline()
+        self.engine_api.stdin.write("setoption name UCI_LimitStrength value true\n")
 
     def to_dict(self):
         res = super().to_dict()

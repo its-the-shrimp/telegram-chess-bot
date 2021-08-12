@@ -4,9 +4,10 @@ import json
 import telegram as tg
 import telegram.ext
 import random
-import boardgame_api
+import chess
 import bot_utils
 import difflib
+import gzip
 
 if os.path.exists("debug_env.json"):
     import logging
@@ -42,10 +43,16 @@ def stop_bot(*args):
     exit()
 
 
-def serialize_bot_data(self):
+def decode_data(self, obj):
+    return {k: gzip.decompress(v).decode() for k, v in obj.items()}
+
+
+def encode_data(self, obj):
     self.bot_data["matches"] = {
         k: v.to_dict() for k, v in self.bot_data["matches"].items()
     }
+    res = self.default_encoder(self, obj)
+    return {k: gzip.compress(v) for k, v in res.items()}
 
 
 commands = [
@@ -54,25 +61,25 @@ commands = [
 ]
 updater = tg.ext.Updater(
     token=os.environ["BOT_TOKEN"],
-    use_context=True,
     defaults=tg.ext.Defaults(quote=True),
     arbitrary_callback_data=True,
     persistence=bot_utils.RedisPersistence(
         url=os.environ["REDISCLOUD_URL"],
         store_callback_data=True,
-        preprocessor=serialize_bot_data,
+        encoder=encode_data,
+        decoder=decode_data,
     ),
     context_types=tg.ext.ContextTypes(context=bot_utils.RedisContext),
     user_sig_handler=stop_bot,
 )
 if not updater.dispatcher.bot_data:
-    updater.dispatcher.bot_data = {"queue": {"chess": []}, "matches": {}}
+    updater.dispatcher.bot_data = {"queue": [], "matches": {}}
 else:
     updater.dispatcher.bot_data["matches"] = {
-        k: boardgame_api.chess.from_dict(v, k, updater.bot)
+        k: chess.from_dict(v, k, updater.bot)
         for k, v in updater.dispatcher.bot_data["matches"].items()
     }
-boardgame_api.chess.BaseMatch.db = updater.persistence.conn
+chess.BaseMatch.db = updater.persistence.conn
 
 
 @avoid_spam
@@ -85,12 +92,14 @@ def start(update, context):
 @avoid_spam
 def unknown(update, context):
     ratios = []
-    d = difflib.SequenceMatcher(a = update.effective_message.text)
+    d = difflib.SequenceMatcher(a=update.effective_message.text)
     for command, _ in commands:
         d.set_seq2(command)
         ratios.append((d.ratio(), command))
-    suggested = max(ratios, key = lambda x: x[0])[1]
-    update.effective_message.reply_text(f"Неизвестная команда. Может, вы имели ввиду {suggested}?")
+    suggested = max(ratios, key=lambda x: x[0])[1]
+    update.effective_message.reply_text(
+        f"Неизвестная команда. Может, вы имели ввиду {suggested}?"
+    )
 
 
 @avoid_spam
@@ -131,12 +140,11 @@ def boardgame_menu(update, context):
                         "target_id": "MAIN",
                         "command": "NEW",
                         "expected_uid": update.effective_user.id,
-                        "game": "chess",
                         "mode": i["code"],
                     },
                 )
             ]
-            for i in getattr(boardgame_api, "chess").MODES
+            for i in chess.MODES
         ]
     )
     update.effective_message.reply_text("Выберите режим:", reply_markup=keyboard)
@@ -144,6 +152,7 @@ def boardgame_menu(update, context):
 
 @avoid_spam
 def button_callback(update, context):
+    logging.debug("Executing button_callback()")
     args = update.callback_query.data
 
     if type(args) == tg.ext.InvalidCallbackData:
@@ -182,6 +191,7 @@ def button_callback(update, context):
                     ]
                 )
             )
+            context.drop_callback_data(update.callback_query)
         elif args["command"] == "ANON_MODE_ON":
             context.db.anon_mode_on(update.effective_user)
             update.callback_query.answer("Анонимный режим включен", show_alert=True)
@@ -201,59 +211,39 @@ def button_callback(update, context):
                     ]
                 )
             )
-        elif args["command"] == "CHOOSE_MODE":
-            keyboard = tg.InlineKeyboardMarkup(
-                [
-                    [
-                        tg.InlineKeyboardButton(
-                            text=i["text"],
-                            callback_data={
-                                "target_id": "MAIN",
-                                "command": "NEW",
-                                "expected_uid": update.effective_user.id,
-                                "game": args["game"],
-                                "mode": i["code"],
-                            },
-                        )
-                    ]
-                    for i in getattr(boardgame_api, args["game"]).MODES
-                ]
-            )
-            update.effective_message.edit_text(
-                text="Выберите режим:", reply_markup=keyboard
-            )
+            context.drop_callback_data(update.callback_query)
         elif args["command"] == "NEW":
             if args["mode"] == "AI":
                 update.effective_message.edit_text("Игра найдена")
-                new = getattr(boardgame_api, args["game"]).AIMatch(
+                new = chess.AIMatch(
                     update.effective_user, update.effective_chat.id, bot=context.bot
                 )
                 context.bot_data["matches"][new.id] = new
                 new.init_turn(setup=True)
+                context.drop_callback_data(update.callback_query)
 
-            elif len(context.bot_data["queue"][args["game"]]) > 0:
-                queued_user, queued_chat, queued_msg = context.bot_data["queue"][
-                    args["game"]
-                ].pop(0)
+            elif len(context.bot_data["queue"]) > 0:
+                queued_user, queued_chat, queued_msg = context.bot_data["queue"].pop(0)
                 if queued_chat == update.effective_chat:
-                    new = getattr(boardgame_api, args["game"]).GroupMatch(
+                    new = chess.GroupMatch(
                         queued_user,
                         update.effective_user,
                         update.effective_chat.id,
                         bot=context.bot,
                     )
                 else:
-                    new = getattr(boardgame_api, args["game"]).PMMatch(
+                    new = chess.PMMatch(
                         queued_user,
                         update.effective_user,
                         queued_chat.id,
                         update.effective_chat.id,
                         bot=context.bot,
                     )
-                queued_msg.edit_text(text="Игра найдена")
+                queued_msg.edit_text("Игра найдена")
                 update.effective_message.edit_text(text="Игра найдена")
                 context.bot_data["matches"][new.id] = new
                 new.init_turn()
+                context.drop_callback_data(update.callback_query)
             else:
                 keyboard = tg.InlineKeyboardMarkup(
                     [
@@ -263,7 +253,6 @@ def button_callback(update, context):
                                 callback_data={
                                     "target_id": "MAIN",
                                     "command": "CANCEL",
-                                    "game": args["game"],
                                     "uid": update.effective_user.id,
                                     "expected_uid": update.effective_user.id,
                                 },
@@ -274,25 +263,29 @@ def button_callback(update, context):
                 update.effective_message.edit_text(
                     text="Ждём игроков...", reply_markup=keyboard
                 )
-                context.bot_data["queue"][args["game"]].append(
+                context.bot_data["queue"].append(
                     (
                         update.effective_user,
                         update.effective_chat,
                         update.effective_message,
                     )
                 )
+                context.drop_callback_data(update.callback_query)
         elif args["command"] == "CANCEL":
-            for index, queued in enumerate(context.bot_data["queue"][args["game"]]):
+            for index, queued in enumerate(context.bot_data["queue"]):
                 if queued[0].id == args["uid"]:
                     queued[2].edit_text(text="Поиск игры отменен")
-                    del context.bot_data["queue"][args["game"]][index]
+                    del context.bot_data["queue"][index]
+            context.drop_callback_data(update.callback_query)
 
     else:
+
         res = context.bot_data["matches"][args["target_id"]].handle_input(args["args"])
         res = res if res else (None, False)
         if context.bot_data["matches"][args["target_id"]].finished:
             del context.bot_data["matches"][args["target_id"]]
         update.callback_query.answer(text=res[0], show_alert=res[1])
+        context.drop_callback_data(update.callback_query)
 
 
 def main():
