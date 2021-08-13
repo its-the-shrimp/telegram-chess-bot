@@ -101,12 +101,16 @@ def decode_fen(fen):
 
 
 def fen_diff(src, dst):
-    src = decode_fen(src).keys()
-    dst = decode_fen(dst).keys()
+    src = decode_fen(src).items()
+    dst = decode_fen(dst).items()
     res = []
     for pos in src:
         if pos not in dst:
-            res.append(list(pos))
+            res.append(list(pos[0]))
+    
+    for pos in dst:
+        if pos not in src:
+            res.append(list(pos[0]))
 
     return res
 
@@ -545,17 +549,21 @@ class BaseMatch:
             if figure.pos == key:
                 del (self.whites if self[key].is_white else self.blacks)[index]
 
-    def _keyboard(self, data, expected_uid, head_button=False):
+    def _keyboard(self, seq, expected_uid, head_button=False):
         res = []
-        for button in data:
+        for button in seq:
+            data = []
+            for argument in button['data']:
+                if type(argument) in [list, tuple]:
+                    data.append(encode_pos(argument))
+                elif argument == None:
+                    data.append('')
+                else:
+                    data.append(str(argument))
             res.append(
                 InlineKeyboardButton(
                     text=button["text"],
-                    callback_data={
-                        "target_id": self.id,
-                        "expected_uid": expected_uid,
-                        "args": button["data"],
-                    },
+                    callback_data=f"{expected_uid if expected_uid else ''}\n{self.id}\n{'#'.join(data)}",
                 )
             )
 
@@ -633,6 +641,9 @@ class BaseMatch:
         self.states.append(self.fen_string())
 
         return turn_info
+        
+    def decode_input(self, args):
+        return [(decode_pos(i) if type(i) == str and len(i) == 2 and not i[0].isdigit() and i[1].isdigit() else i) for i in args]
 
     def visualise_board(
         self, selected=[None, None], pointers=[], fen="", return_bytes=True
@@ -848,6 +859,7 @@ class GroupMatch(BaseMatch):
                 )
 
     def handle_input(self, args):
+        args = self.decode_input(args)
         player, opponent = self.players
         allies, enemies = self.figures
         if args[0] == "INIT_MSG":
@@ -1120,6 +1132,7 @@ class PMMatch(BaseMatch):
                     )
 
     def handle_input(self, args):
+        args = self.decode_input(args)
         player, opponent = self.players
         allies, enemies = self.figures
         if args[0] == "INIT_MSG":

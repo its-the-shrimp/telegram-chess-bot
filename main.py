@@ -46,6 +46,20 @@ def stop_bot(*args):
 def decode_data(self, obj):
     return {k: gzip.decompress(v).decode() for k, v in obj.items()}
 
+def parse_callbackquery_data(data: str) -> dict:
+    data = data.split('\n')
+    res = {'expected_uid': int(data[0]) if data[0] else None, 'target_id': data[1], 'args': []}
+    for argument in data[2].split('#'):
+        if argument.isdigit():
+            res['args'].append(int(argument))
+        elif argument == '$u':
+            res['args'].append(res['expected_uid'])
+        elif argument:
+            res['args'].append(argument)
+        else:
+            res['args'].append(None)
+    
+    return res
 
 def encode_data(self, obj):
     self.bot_data["matches"] = {
@@ -62,10 +76,10 @@ commands = [
 updater = tg.ext.Updater(
     token=os.environ["BOT_TOKEN"],
     defaults=tg.ext.Defaults(quote=True),
-    arbitrary_callback_data=True,
     persistence=bot_utils.RedisPersistence(
         url=os.environ["REDISCLOUD_URL"],
-        store_callback_data=True,
+        store_user_data=False,
+        store_chat_data=False,
         encoder=encode_data,
         decoder=decode_data,
     ),
@@ -117,11 +131,7 @@ def settings(update, context):
                 [
                     tg.InlineKeyboardButton(
                         text=f'Анонимный режим: {"🟢" if is_anon else "🔴"}',
-                        callback_data={
-                            "target_id": "MAIN",
-                            "expected_uid": update.effective_user.id,
-                            "command": "ANON_MODE_OFF" if is_anon else "ANON_MODE_ON",
-                        },
+                        callback_data=f"{update.effective_user.id}\nMAIN\n{'ANON_MODE_OFF' if is_anon else 'ANON_MODE_ON'}",
                     )
                 ]
             ]
@@ -136,15 +146,11 @@ def boardgame_menu(update, context):
             [
                 tg.InlineKeyboardButton(
                     text=i["text"],
-                    callback_data={
-                        "target_id": "MAIN",
-                        "command": "NEW",
-                        "expected_uid": update.effective_user.id,
-                        "mode": i["code"],
-                    },
+                    callback_data=f"{update.effective_user.id}\nMAIN\nNEW#{i['code']}",
                 )
-            ]
-            for i in chess.MODES
+                for i in chess.MODES
+            ],
+            [tg.InlineKeyboardButton(text='Отменить', callback_data=f"{update.effective_user.id}\nMAIN\nCANCEL#")]
         ]
     )
     update.effective_message.reply_text("Выберите режим:", reply_markup=keyboard)
@@ -152,16 +158,11 @@ def boardgame_menu(update, context):
 
 @avoid_spam
 def button_callback(update, context):
-    logging.debug("Executing button_callback()")
-    args = update.callback_query.data
-
-    if type(args) == tg.ext.InvalidCallbackData:
-        update.callback_query.answer("Ошибка: информация о сообщении не найдена.")
-        return
-
-    if args["expected_uid"] != update.callback_query.from_user.id:
+    args = parse_callbackquery_data(update.callback_query.data)
+    print(args)
+    if args["expected_uid"] and args["expected_uid"] != update.callback_query.from_user.id:
         if args["target_id"] == "MAIN":
-            update.callback_query.answer()
+            update.callback_query.answer("Ошибка")
         else:
             update.callback_query.answer(
                 text=context.bot_data["matches"][args["target_id"]].WRONG_PERSON_MSG,
@@ -170,9 +171,9 @@ def button_callback(update, context):
         return
 
     if args["target_id"] == "MAIN":
-        if args["command"] == "NA":
+        if args["args"][0] == "NA":
             update.callback_query.answer(text="Недоступно", show_alert=True)
-        elif args["command"] == "ANON_MODE_OFF":
+        elif args["args"][0] == "ANON_MODE_OFF":
             context.db.anon_mode_off(update.effective_user)
             update.callback_query.answer("Анонимный режим отключен", show_alert=True)
             update.effective_message.edit_reply_markup(
@@ -181,18 +182,14 @@ def button_callback(update, context):
                         [
                             tg.InlineKeyboardButton(
                                 text=f'Анонимный режим: {"🟢" if context.db.is_anon(update.effective_user) else "🔴"}',
-                                callback_data={
-                                    "target_id": "MAIN",
-                                    "expected_uid": update.effective_user.id,
-                                    "command": "ANON_MODE_ON",
-                                },
+                                callback_data=f"{update.effective_user.id}\nMAIN\nANON_MODE_ON",
                             )
                         ]
                     ]
                 )
             )
             context.drop_callback_data(update.callback_query)
-        elif args["command"] == "ANON_MODE_ON":
+        elif args["args"][0] == "ANON_MODE_ON":
             context.db.anon_mode_on(update.effective_user)
             update.callback_query.answer("Анонимный режим включен", show_alert=True)
             update.effective_message.edit_reply_markup(
@@ -201,26 +198,21 @@ def button_callback(update, context):
                         [
                             tg.InlineKeyboardButton(
                                 text=f'Анонимный режим: {"🟢" if context.db.is_anon(update.effective_user) else "🔴"}',
-                                callback_data={
-                                    "target_id": "MAIN",
-                                    "expected_uid": update.effective_user.id,
-                                    "command": "ANON_MODE_OFF",
-                                },
+                                callback_data=f"{update.effective_user.id}\nMAIN\nANON_MODE_OFF",
                             )
                         ]
                     ]
                 )
             )
             context.drop_callback_data(update.callback_query)
-        elif args["command"] == "NEW":
-            if args["mode"] == "AI":
+        elif args["args"][0] == "NEW":
+            if args["args"][1] == "AI":
                 update.effective_message.edit_text("Игра найдена")
                 new = chess.AIMatch(
                     update.effective_user, update.effective_chat.id, bot=context.bot
                 )
                 context.bot_data["matches"][new.id] = new
                 new.init_turn(setup=True)
-                context.drop_callback_data(update.callback_query)
 
             elif len(context.bot_data["queue"]) > 0:
                 queued_user, queued_chat, queued_msg = context.bot_data["queue"].pop(0)
@@ -243,19 +235,13 @@ def button_callback(update, context):
                 update.effective_message.edit_text(text="Игра найдена")
                 context.bot_data["matches"][new.id] = new
                 new.init_turn()
-                context.drop_callback_data(update.callback_query)
             else:
                 keyboard = tg.InlineKeyboardMarkup(
                     [
                         [
                             tg.InlineKeyboardButton(
                                 text="Отмена",
-                                callback_data={
-                                    "target_id": "MAIN",
-                                    "command": "CANCEL",
-                                    "uid": update.effective_user.id,
-                                    "expected_uid": update.effective_user.id,
-                                },
+                                callback_data=f"{update.effective_user.id}\nMAIN\nCANCEL#$u",
                             )
                         ]
                     ]
@@ -270,13 +256,14 @@ def button_callback(update, context):
                         update.effective_message,
                     )
                 )
-                context.drop_callback_data(update.callback_query)
-        elif args["command"] == "CANCEL":
-            for index, queued in enumerate(context.bot_data["queue"]):
-                if queued[0].id == args["uid"]:
-                    queued[2].edit_text(text="Поиск игры отменен")
-                    del context.bot_data["queue"][index]
-            context.drop_callback_data(update.callback_query)
+        elif args["args"][0] == "CANCEL":
+            if args.get('uid'):
+                for index, queued in enumerate(context.bot_data["queue"]):
+                    if queued[0].id == args["args"][1]:
+                        queued[2].edit_text("Поиск игры отменен")
+                        del context.bot_data["queue"][index]
+            else:
+                update.callback_query.message.edit_text("Поиск игры отменен")
 
     else:
 
@@ -285,7 +272,6 @@ def button_callback(update, context):
         if context.bot_data["matches"][args["target_id"]].finished:
             del context.bot_data["matches"][args["target_id"]]
         update.callback_query.answer(text=res[0], show_alert=res[1])
-        context.drop_callback_data(update.callback_query)
 
 
 def main():
