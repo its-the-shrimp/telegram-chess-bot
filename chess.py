@@ -348,6 +348,14 @@ class King(BaseFigure):
     name = "Король"
     fen_symbol = ["k", "K"]
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.can_castle = True
+
+    def move(self, *args, **kwargs):
+        super().move(*args, **kwargs)
+        self.can_castle = False
+
     def get_moves(self, for_fen=False):
         allies, enemies = (
             (self.match.whites, self.match.blacks)
@@ -368,7 +376,7 @@ class King(BaseFigure):
                             else "normal",
                         }
                     )
-        if not self.moved and not self.in_check():
+        if self.can_castle:
             Y = 0 if self.is_white else 7
             a_rook = self.match[[0, Y]]
             h_rook = self.match[[7, Y]]
@@ -412,7 +420,9 @@ class King(BaseFigure):
             *[i.get_moves() for i in enemies]
         )
 
-        return self.pos in [i["pos"] for i in enemy_moves]
+        res = self.pos in [i["pos"] for i in enemy_moves]
+        self.can_castle = not res
+        return res
 
 
 class BaseMatch:
