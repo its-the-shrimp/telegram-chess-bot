@@ -1,6 +1,8 @@
 import redis
 from telegram.ext import DictPersistence, CallbackContext
 import logging
+import sys
+import json
 
 
 class RedisInterface(redis.Redis):
@@ -122,3 +124,11 @@ class RedisContext(CallbackContext):
     @property
     def db(self):
         return self.dispatcher.persistence.conn
+
+if __name__ == '__main__':
+    env = json.load(open('debug_env.json'))
+    
+    if sys.argv[1] == 'clear':
+        conn = redis.Redis.from_url(env['REDISCLOUD_URL'])
+        for key in conn.scan_iter():
+            del conn[key]

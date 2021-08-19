@@ -1,6 +1,7 @@
 import itertools
 import random
 import subprocess
+import numpy
 import os.path
 from telegram import (
     InlineKeyboardMarkup,
@@ -9,10 +10,12 @@ from telegram import (
     InputMediaVideo,
     User,
     Message,
+    Chat,
 )
 import cv2
 import cv_utils
-import numpy
+import logging
+import time
 
 IDSAMPLE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-+"
 MODES = [{"text": "Против бота", "code": "AI"}, {"text": "Онлайн", "code": "QUICK"}]
@@ -73,16 +76,6 @@ def _group_buttons(obj, n, head_button=False):
     return res
 
 
-def _short_dict(obj):
-    obj = obj.to_dict()
-    keys = list(obj.keys())
-    for key in keys:
-        if not bool(obj[key]) and key not in ["is_bot"]:
-            del obj[key]
-
-    return obj
-
-
 def decode_fen(fen):
     res = {}
     fen = fen.split("/")
@@ -128,51 +121,8 @@ def in_bounds(pos):
 
 
 def from_dict(obj, match_id, bot):
-    player1 = User.de_json(obj["player1"], bot)
-    msg = Message.de_json(obj["msg"], bot)
-    if "player2" in obj:
-        player2 = User.de_json(obj["player2"], bot)
-        if not "msg2" in obj:
-            res = GroupMatch(
-                player1, player2, obj["chat_id"], bot=bot, fen=obj["states"][-1]
-            )
-            res.msg = msg
-        else:
-            res = PMMatch(
-                player1,
-                player2,
-                obj["chat_id1"],
-                obj["chat_id2"],
-                bot=bot,
-                fen=obj["states"][-1],
-            )
-            res.msg1 = msg
-            res.msg2 = Message.de_json(obj["msg2"], bot)
-
-    else:
-        res = AIMatch(
-            player1,
-            obj["chat_id1"],
-            bot=bot,
-            fen=obj["states"][-1] if obj["states"] else STARTPOS,
-        )
-        res.set_elo(obj["rating"])
-        res.msg1 = msg
-
-    res.id = match_id
-    res.states = obj["states"]
-    if obj.get("rating", "0") is not None:
-        res.turn += 1
-        res.empty_halfturns += 1
-        res.is_white_turn = not res.is_white_turn
-    if type(res) == AIMatch:
-        res.init_msg_text = res.msg1.caption
-    elif type(res) == PMMatch:
-        res.init_msg_text = res.msg1.text if res.is_white_turn else res.msg2.text
-    elif type(res) == GroupMatch:
-        res.init_msg_text = res.msg.text
-
-    return res
+    cls = eval(obj["type"] + "Match")
+    return cls.from_dict(obj, match_id, bot)
 
 
 class BaseFigure:
@@ -459,7 +409,7 @@ class King(BaseFigure):
     def in_check(self):
         enemies = self.match.blacks if self.is_white else self.match.whites
         enemy_moves = itertools.chain(
-            *[i.get_moves() for i in enemies if type(i) != King]
+            *[i.get_moves() for i in enemies]
         )
 
         return self.pos in [i["pos"] for i in enemy_moves]
@@ -469,16 +419,16 @@ class BaseMatch:
     WRONG_PERSON_MSG = "Сейчас не ваш ход!"
     db = None
 
-    def __init__(self, bot=None, fen=STARTPOS):
+    def __init__(self, bot=None, fen=STARTPOS, id=None):
+        self.init_msg_text = None
         self.bot = bot
         self.whites = []
         self.blacks = []
         self.states = []
         self.finished = False
-        self.id = "".join(random.choices(IDSAMPLE, k=8))
+        self.id = id if id else "".join(random.choices(IDSAMPLE, k=8))
         self.image_filename = f"chess-{self.id}.jpg"
         self.video_filename = f"chess-{self.id}.mp4"
-        self.check_indexes = []
         (
             board,
             self.is_white_turn,
@@ -553,11 +503,11 @@ class BaseMatch:
         res = []
         for button in seq:
             data = []
-            for argument in button['data']:
+            for argument in button["data"]:
                 if type(argument) in [list, tuple]:
                     data.append(encode_pos(argument))
                 elif argument == None:
-                    data.append('')
+                    data.append("")
                 else:
                     data.append(str(argument))
             res.append(
@@ -573,7 +523,7 @@ class BaseMatch:
             return None
 
     def to_dict(self):
-        return {"states": self.states}
+        return {"type": "Base", "states": self.states}
 
     @property
     def figures(self):
@@ -643,7 +593,17 @@ class BaseMatch:
         return turn_info
         
     def decode_input(self, args):
-        return [(decode_pos(i) if type(i) == str and len(i) == 2 and not i[0].isdigit() and i[1].isdigit() else i) for i in args]
+        return [
+            (
+                decode_pos(i)
+                if type(i) == str
+                and len(i) == 2
+                and not i[0].isdigit()
+                and i[1].isdigit()
+                else i
+            )
+            for i in args
+        ]
 
     def visualise_board(
         self, selected=[None, None], pointers=[], fen="", return_bytes=True
@@ -756,7 +716,6 @@ class BaseMatch:
             if king.in_check():
                 res[-1] += encode_pos(king.pos)
 
-        print(self.states)
         diff = fen_diff(self.states[-1].split(" ")[0], res[0]) if self.states else []
         res.append("/".join([encode_pos(i) for i in diff]))
         if not res[-1]:
@@ -772,6 +731,34 @@ class GroupMatch(BaseMatch):
         self.msg = None
         super().__init__(**kwargs)
 
+    @classmethod
+    def from_dict(cls, obj, match_id, bot):
+        logging.debug(f"Constructing {cls.__name__} object:", obj)
+        player1 = User.de_json(obj["player1"] | {"is_bot": False}, bot)
+        player2 = User.de_json(obj["player2"] | {"is_bot": False}, bot)
+        new = cls(
+            player1,
+            player2,
+            obj["chat_id"],
+            bot=bot,
+            fen=obj["states"][-1],
+            id=match_id,
+        )
+        new.states = obj["states"]
+        new.init_msg_text = obj["msg_text"]
+        new.msg = Message(
+            obj["msg_id"],
+            time.monotonic,
+            Chat(obj["chat_id"], "group", bot=bot),
+            bot=bot,
+            caption=obj["msg_text"],
+        )
+        new.turn += 1
+        new.empty_halfturns += 1
+        new.is_white_turn = not new.is_white_turn
+
+        return new
+
     @property
     def players(self):
         return (
@@ -782,10 +769,24 @@ class GroupMatch(BaseMatch):
 
     def to_dict(self):
         res = super().to_dict()
-        res["player1"] = _short_dict(self.player1)
-        res["player2"] = _short_dict(self.player2)
-        res["chat_id"] = self.chat_id
-        res["msg"] = _short_dict(self.msg)
+        res.update(
+            {
+                "type": "Group",
+                "chat_id": self.chat_id,
+                "msg_id": self.msg.message_id,
+                "msg_text": self.init_msg_text,
+                "player1": {
+                    k: v
+                    for k, v in self.player1.to_dict().items()
+                    if k in ["username", "id", "first_name", "last_name"]
+                },
+                "player2": {
+                    k: v
+                    for k, v in self.player2.to_dict().items()
+                    if k in ["username", "id", "first_name", "last_name"]
+                },
+            }
+        )
         return res
 
     def init_turn(self, move=[None, None], turn_info=None, promotion=""):
@@ -824,7 +825,7 @@ class GroupMatch(BaseMatch):
             video, thumb = self.get_video()
             self.msg.edit_media(
                 media=InputMediaVideo(
-                    self.get_video(),
+                    video,
                     caption=msg,
                     filename=self.video_filename,
                     thumb=thumb,
@@ -990,6 +991,41 @@ class PMMatch(BaseMatch):
         self.msg2 = None
         super().__init__(**kwargs)
 
+    @classmethod
+    def from_dict(cls, obj, match_id, bot):
+        logging.debug(f"Constructing {cls.__name__} object:", obj)
+        player1 = User.de_json(obj["player1"] | {"is_bot": False}, bot)
+        player2 = User.de_json(obj["player2"] | {"is_bot": False}, bot)
+        new = cls(
+            player1,
+            player2,
+            obj["chat_id1"],
+            obj["chat_id2"],
+            bot=bot,
+            fen=obj["states"][-1],
+            id=match_id,
+        )
+        new.states = obj["states"]
+        new.init_msg_text = obj["msg_text"]
+        new.msg1 = Message(
+            obj["msg_id1"],
+            time.monotonic,
+            Chat(obj["chat_id1"], "private", bot=bot),
+            bot=bot,
+            caption=obj["msg_text"],
+        )
+        new.msg2 = Message(
+            obj["msg_id2"],
+            time.monotonic,
+            Chat(obj["chat_id2"], "private", bot=bot),
+            bot=bot,
+        )
+        new.turn += 1
+        new.empty_halfturns += 1
+        new.is_white_turn = not new.is_white_turn
+
+        return new
+
     @property
     def player_msg(self):
         return self.msg1 if self.is_white_turn else self.msg2
@@ -1030,13 +1066,26 @@ class PMMatch(BaseMatch):
 
     def to_dict(self):
         res = super().to_dict()
-        res["player1"] = _short_dict(self.player1)
-        res["player2"] = _short_dict(self.player2)
-        res["chat_id1"] = self.chat_id1
-        res["chat_id2"] = self.chat_id2
-        res["msg"] = _short_dict(self.msg1)
-        if self.msg2:
-            res["msg2"] = _short_dict(self.msg2)
+        res.update(
+            {
+                "type": "PM",
+                "chat_id1": self.chat_id1,
+                "chat_id2": self.chat_id2,
+                "msg_id1": self.msg1.message_id,
+                "msg_id2": getattr(self.msg2, 'message_id', None),
+                "msg_text": self.init_msg_text,
+                "player1": {
+                    k: v
+                    for k, v in self.player1.to_dict().items()
+                    if k in ["username", "id", "first_name", "last_name"]
+                },
+                "player2": {
+                    k: v
+                    for k, v in self.player2.to_dict().items()
+                    if k in ["username", "id", "first_name", "last_name"]
+                },
+            }
+        )
         return res
 
     def init_turn(self, move=[None, None], turn_info=None, promotion=""):
@@ -1082,7 +1131,7 @@ class PMMatch(BaseMatch):
         if self.finished:
             video, thumb = self.get_video()
             new_msg = InputMediaVideo(
-                video, caption=msg, filename=self.video_filename, thumb=thumb
+                video, caption=player_text, filename=self.video_filename, thumb=thumb
             )
             self.player_msg = self.player_msg.edit_media(media=new_msg)
             if self.opponent_msg:
@@ -1274,11 +1323,34 @@ class AIMatch(PMMatch):
         self.engine_api.stdout.readline()
         self.engine_api.stdin.write("setoption name UCI_LimitStrength value true\n")
 
+    @classmethod
+    def from_dict(cls, obj, match_id, bot):
+        logging.debug(f"Constructing {cls.__name__} object: {obj}")
+        player = User.de_json(obj["player1"] | {"is_bot": False}, bot)
+        new = cls(player, obj["chat_id1"], bot=bot, fen=obj["states"][-1], id=match_id)
+        new.states = obj["states"]
+        new.init_msg_text = obj["msg_text"]
+        new.set_elo(obj["ai_rating"])
+        new.msg1 = Message(
+            obj["msg_id1"],
+            time.monotonic,
+            Chat(obj["chat_id1"], "private", bot=bot),
+            bot=bot,
+            caption=obj["msg_text"],
+        )
+        if obj["ai_rating"]:
+            new.turn += 1
+            new.empty_halfturns += 1
+            new.is_white_turn = not new.is_white_turn
+
+        return new
+
     def to_dict(self):
         res = super().to_dict()
         del res["player2"]
+        del res["msg_id2"]
         del res["chat_id2"]
-        res["rating"] = self.ai_rating
+        res.update({"ai_rating": self.ai_rating, "type": "AI"})
         return res
 
     def set_elo(self, value):

@@ -46,20 +46,26 @@ def stop_bot(*args):
 def decode_data(self, obj):
     return {k: gzip.decompress(v).decode() for k, v in obj.items()}
 
+
 def parse_callbackquery_data(data: str) -> dict:
-    data = data.split('\n')
-    res = {'expected_uid': int(data[0]) if data[0] else None, 'target_id': data[1], 'args': []}
-    for argument in data[2].split('#'):
+    data = data.split("\n")
+    res = {
+        "expected_uid": int(data[0]) if data[0] else None,
+        "target_id": data[1],
+        "args": [],
+    }
+    for argument in data[2].split("#"):
         if argument.isdigit():
-            res['args'].append(int(argument))
-        elif argument == '$u':
-            res['args'].append(res['expected_uid'])
+            res["args"].append(int(argument))
+        elif argument == "$u":
+            res["args"].append(res["expected_uid"])
         elif argument:
-            res['args'].append(argument)
+            res["args"].append(argument)
         else:
-            res['args'].append(None)
-    
+            res["args"].append(None)
+
     return res
+
 
 def encode_data(self, obj):
     self.bot_data["matches"] = {
@@ -150,7 +156,12 @@ def boardgame_menu(update, context):
                 )
                 for i in chess.MODES
             ],
-            [tg.InlineKeyboardButton(text='Отменить', callback_data=f"{update.effective_user.id}\nMAIN\nCANCEL#")]
+            [
+                tg.InlineKeyboardButton(
+                    text="Отменить",
+                    callback_data=f"{update.effective_user.id}\nMAIN\nCANCEL#",
+                )
+            ],
         ]
     )
     update.effective_message.reply_text("Выберите режим:", reply_markup=keyboard)
@@ -159,8 +170,10 @@ def boardgame_menu(update, context):
 @avoid_spam
 def button_callback(update, context):
     args = parse_callbackquery_data(update.callback_query.data)
-    print(args)
-    if args["expected_uid"] and args["expected_uid"] != update.callback_query.from_user.id:
+    if (
+        args["expected_uid"]
+        and args["expected_uid"] != update.callback_query.from_user.id
+    ):
         if args["target_id"] == "MAIN":
             update.callback_query.answer("Ошибка")
         else:
@@ -188,7 +201,6 @@ def button_callback(update, context):
                     ]
                 )
             )
-            context.drop_callback_data(update.callback_query)
         elif args["args"][0] == "ANON_MODE_ON":
             context.db.anon_mode_on(update.effective_user)
             update.callback_query.answer("Анонимный режим включен", show_alert=True)
@@ -204,7 +216,6 @@ def button_callback(update, context):
                     ]
                 )
             )
-            context.drop_callback_data(update.callback_query)
         elif args["args"][0] == "NEW":
             if args["args"][1] == "AI":
                 update.effective_message.edit_text("Игра найдена")
@@ -257,7 +268,7 @@ def button_callback(update, context):
                     )
                 )
         elif args["args"][0] == "CANCEL":
-            if args.get('uid'):
+            if args.get("uid"):
                 for index, queued in enumerate(context.bot_data["queue"]):
                     if queued[0].id == args["args"][1]:
                         queued[2].edit_text("Поиск игры отменен")
@@ -266,12 +277,16 @@ def button_callback(update, context):
                 update.callback_query.message.edit_text("Поиск игры отменен")
 
     else:
-
-        res = context.bot_data["matches"][args["target_id"]].handle_input(args["args"])
-        res = res if res else (None, False)
-        if context.bot_data["matches"][args["target_id"]].finished:
-            del context.bot_data["matches"][args["target_id"]]
-        update.callback_query.answer(text=res[0], show_alert=res[1])
+        if context.bot_data["matches"].get(args["target_id"]):
+            res = context.bot_data["matches"][args["target_id"]].handle_input(
+                args["args"]
+            )
+            res = res if res else (None, False)
+            if context.bot_data["matches"][args["target_id"]].finished:
+                del context.bot_data["matches"][args["target_id"]]
+            update.callback_query.answer(text=res[0], show_alert=res[1])
+        else:
+            update.callback_query.answer(text="Ошибка: Матч не найден")
 
 
 def main():
