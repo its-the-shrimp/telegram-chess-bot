@@ -2,18 +2,15 @@ import os
 import os.path
 import json
 import telegram as tg
-import telegram.ext
-import random
 import chess
 import bot_utils
 import difflib
 import gzip
+import logging
+
+logging.basicConfig(format="%(relativeCreated)s %(module)s %(message)s", level=logging.DEBUG)
 
 if os.path.exists("debug_env.json"):
-    import logging
-
-    logging.basicConfig(format="%(asctime)s %(message)s", level=logging.DEBUG)
-
     with open("debug_env.json") as r:
         os.environ.update(json.load(r))
 
@@ -170,6 +167,7 @@ def boardgame_menu(update, context):
 @avoid_spam
 def button_callback(update, context):
     args = parse_callbackquery_data(update.callback_query.data)
+    logging.debug(f"Handling user input: {args}")
     if (
         args["expected_uid"]
         and args["expected_uid"] != update.callback_query.from_user.id

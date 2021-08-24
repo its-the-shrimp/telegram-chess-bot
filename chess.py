@@ -2,7 +2,7 @@ import itertools
 import random
 import subprocess
 import numpy
-import os.path
+import os
 from telegram import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -11,14 +11,18 @@ from telegram import (
     User,
     Message,
     Chat,
+    Bot,
 )
 import cv2
 import cv_utils
 import logging
 import time
+import collections
+from typing import Any, Union, List, Type, Optional
 
 IDSAMPLE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-+"
 MODES = [{"text": "Против бота", "code": "AI"}, {"text": "Онлайн", "code": "QUICK"}]
+MOVETYPE_MARKERS = {"normal": "", "killing": "❌", "castling": "🔀", "promotion": "⏫"}
 FENSYMBOLS = {
     "k": "King",
     "q": "Queen",
@@ -27,14 +31,38 @@ FENSYMBOLS = {
     "n": "Knight",
     "p": "Pawn",
 }
+PGNSYMBOLS = {
+    "emoji": {
+        "Pawn": "",
+        "Rook": "♜",
+        "Bishop": "♝",
+        "Knight": "♞",
+        "Queen": "♛",
+        "King": "♚",
+    },
+    "en": {
+        "Pawn": "",
+        "Rook": "R",
+        "Bishop": "B",
+        "Knight": "N",
+        "Queen": "Q",
+        "King": "K",
+    },
+}
 IMAGES = {}
 for name in ["Pawn", "King", "Bishop", "Rook", "Queen", "Knight"]:
     IMAGES[name] = [
         cv2.imread(f"images/chess/{color}_{name.lower()}.png", cv2.IMREAD_UNCHANGED)
         for color in ["black", "white"]
     ]
-STARTPOS = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 - -"
-POINTER_COLORS = {"normal": "#00cc36", "killing": "cc0000", "special": "#3ba7ff"}
+STARTPOS = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+MOVETYPE_COLORS = {
+    "normal": "#00cc36",
+    "killing": "cc0000",
+    "castling": "#3ba7ff",
+    "promotion": "#3ba7ff",
+    "killing-promotion": "#3ba7ff",
+}
 BOARD_IMG = cv2.imread("images/chess/board.png", cv2.IMREAD_UNCHANGED)
 
 POINTER_IMG = numpy.zeros((50, 50, 4), dtype=numpy.uint8)
@@ -42,11 +70,11 @@ width = POINTER_IMG.shape[0] // 2
 for row in range(POINTER_IMG.shape[0]):
     for column in range(POINTER_IMG.shape[1]):
         if abs(row - width) + abs(column - width) > round(width * 1.5):
-            POINTER_IMG[row][column] = cv_utils.from_hex(POINTER_COLORS["normal"]) + [
+            POINTER_IMG[row][column] = cv_utils.from_hex(MOVETYPE_COLORS["normal"]) + [
                 255
             ]
         elif abs(row - width) + abs(column - width) == round(width * 1.5):
-            POINTER_IMG[row][column] = cv_utils.from_hex(POINTER_COLORS["normal"]) + [
+            POINTER_IMG[row][column] = cv_utils.from_hex(MOVETYPE_COLORS["normal"]) + [
                 127
             ]
 INCOMING_POINTER_IMG = numpy.zeros((50, 50, 4), dtype=numpy.uint8)
@@ -54,29 +82,35 @@ for row in range(INCOMING_POINTER_IMG.shape[0]):
     for column in range(INCOMING_POINTER_IMG.shape[1]):
         if abs(row - width) + abs(column - width) < round(width * 0.5):
             INCOMING_POINTER_IMG[row][column] = cv_utils.from_hex(
-                POINTER_COLORS["normal"]
+                MOVETYPE_COLORS["normal"]
             ) + [255]
         elif abs(row - width) + abs(column - width) == round(width * 0.5):
             INCOMING_POINTER_IMG[row][column] = cv_utils.from_hex(
-                POINTER_COLORS["normal"]
+                MOVETYPE_COLORS["normal"]
             ) + [127]
+del width, column, row
+
+BoardPoint = collections.namedtuple("BoardPoint", ("column", "row"), module="chess")
+JSON = dict[str, Union[str, dict]]
 
 
-def _group_buttons(obj, n, head_button=False):
+def _group_items(
+    obj: list[Any], n: int, head_item: bool = False
+) -> list[list[Any]]:
     res = []
     for index in range(len(obj)):
-        index -= int(head_button)
+        index -= int(head_item)
         if index == -1:
             res.append([obj[0]])
         elif index // n == index / n:
-            res.append([obj[index + int(head_button)]])
+            res.append([obj[index + int(head_item)]])
         else:
-            res[-1].append(obj[index + int(head_button)])
+            res[-1].append(obj[index + int(head_item)])
 
     return res
 
 
-def decode_fen(fen):
+def decode_fen(fen: str) -> dict[tuple, str]:
     res = {}
     fen = fen.split("/")
     for line in range(8):
@@ -93,376 +127,239 @@ def decode_fen(fen):
     return res
 
 
-def fen_diff(src, dst):
-    src = decode_fen(src).items()
-    dst = decode_fen(dst).items()
-    res = []
-    for pos in src:
-        if pos not in dst:
-            res.append(list(pos[0]))
-    
-    for pos in dst:
-        if pos not in src:
-            res.append(list(pos[0]))
-
-    return res
+def decode_pos(pos: str) -> BoardPoint:
+    return BoardPoint(ord(pos[0]) - 97, int(pos[1]) - 1)
 
 
-def decode_pos(pos):
-    return [ord(pos[0]) - 97, int(pos[1]) - 1]
+def encode_pos(pos: BoardPoint) -> str:
+    return chr(pos.column + 97) + str(pos.row + 1)
 
 
-def encode_pos(pos):
-    return chr(pos[0] + 97) + str(pos[1] + 1)
+def in_bounds(pos: BoardPoint) -> bool:
+    return 0 <= pos.column <= 7 and 0 <= pos.row <= 7
 
 
-def in_bounds(pos):
-    return 0 <= pos[0] <= 7 and 0 <= pos[1] <= 7
-
-
-def from_dict(obj, match_id, bot):
+def from_dict(obj: dict[str, Any], match_id: str, bot: Bot) -> "BaseMatch":
     cls = eval(obj["type"] + "Match")
     return cls.from_dict(obj, match_id, bot)
 
 
-class BaseFigure:
-    name = "PLACEHOLDER"
-    fen_symbol = ["none", "NONE"]
+class Move:
+    @classmethod
+    def from_pgn(cls, move: str, board_obj: "BoardInfo", language_code: str = "en"):
+        symbols = {v: k for k, v in PGNSYMBOLS[language_code].items()}
+        row = 0 if board_obj.is_white_turn else 7
+        move = move.strip("#+")
 
-    def __init__(self, pos, match, is_white):
-        self.image = IMAGES[type(self).__name__][int(is_white)]
-        self.pos = pos
-        self.is_white = is_white
-        self.match = match
-        self.moved = False
-        self.fen_symbol = self.fen_symbol[int(is_white)]
-
-    def __str__(self):
-        return f"{self.name} на {encode_pos(self.pos)}"
-
-    def get_moves(self):
-        return []
-
-    def move(self, pos):
-        print(
-            self.match.id,
-            "::",
-            self.match.players[0].name,
-            ":",
-            encode_pos(self.pos) + encode_pos(pos),
-        )
-        if pos == self.match.enpassant_pos[1]:
-            figure = self.match[self.match.enpassant_pos[0]]
-            del self.match[self.match.enpassant_pos[0]]
+        if move == "O-O":
+            return cls(
+                board_obj,
+                BoardPoint(4, row),
+                BoardPoint(6, row),
+                King,
+                rook_src=BoardPoint(7, row),
+                rook_dst=BoardPoint(5, row),
+            )
+        elif move == "O-O-O":
+            return cls(
+                board_obj,
+                BoardPoint(4, row),
+                BoardPoint(2, row),
+                King,
+                rook_src=BoardPoint(0, row),
+                rook_dst=BoardPoint(3, row),
+            )
         else:
-            figure = self.match[pos]
-            if figure:
-                del self.match[pos]
+            if move[0] in "abcdefghx":
+                piece_cls = Pawn
+            else:
+                piece_cls = eval(symbols[move[0]])
+                move = move[1:]
 
-        self.pos = pos
-        self.match.enpassant_pos = [None, None]
-        self.moved = True
-        return figure
+            if "x" in move:
+                killing = True
+                hint, move = move.split("x")
+            else:
+                killing = False
+                if len(move) == 3:
+                    hint = move[0]
+                    move = move[1:]
+                else:
+                    hint = ""
 
-    def is_legal(self, move_pos):
-        if not in_bounds(move_pos):
-            return False
+            if "=" in move:
+                move, promoted_to = move.split("=")
+                promoted_to = eval(symbols[promoted_to])
+            else:
+                promoted_to = None
 
-        actual_pos = self.pos
-        allied_king = self.match.get_king(self.is_white)
-        killed = self.match[move_pos]
-        if killed:
-            del self.match[move_pos]
-        self.pos = move_pos
+            if hint and hint in "abcdefgh":
+                row_hint = None
+                column_hint = ord(hint) - 97
+            elif hint.isdigit():
+                row_hint = int(hint) - 1
+                column_hint = None
+            else:
+                row_hint, column_hint = (None, None)
 
-        res = allied_king.in_check()
+            target = piece_cls(decode_pos(move), board_obj, board_obj.is_white_turn)
+            for src in target.get_all_moves(target.pos, target.is_white, is_killing=killing):
+                piece = board_obj[src]
+                if all(
+                    [
+                        column_hint in [src[0], None],
+                        row_hint in [src[1], None],
+                        (target.is_white == piece.is_white) if piece else False,
+                        type(piece) == piece_cls,
+                    ]
+                ):
+                    if (
+                        piece_cls != Pawn
+                        or bool(abs(src[0] - target.pos[0])) == killing
+                    ):
+                        break
 
-        self.pos = actual_pos
-        if killed:
-            self.match[move_pos] = killed
-        return not res
-
-
-class Pawn(BaseFigure):
-    name = "Пешка"
-    fen_symbol = ["p", "P"]
-
-    def get_moves(self):
-        allies, enemies = (
-            (self.match.whites, self.match.blacks)
-            if self.is_white
-            else (self.match.blacks, self.match.whites)
+        return cls(
+            board_obj,
+            src,
+            target.pos,
+            piece_cls,
+            killed=type(board_obj[target.pos]),
+            new_piece=promoted_to,
         )
+
+    def __init__(
+        self,
+        board_obj: "BoardInfo",
+        src: BoardPoint,
+        dst: BoardPoint,
+        piece: Type["BasePiece"],
+        killed: Optional[Type["BasePiece"]] = type(None),
+        rook_src: BoardPoint = None,
+        rook_dst: BoardPoint = None,
+        new_piece: type = None,
+    ):
+        assert board_obj[src] is not None
+        self.src = src
+        self.dst = dst
+        self.piece = piece
+        self.killed = killed
+        self.new_piece = new_piece
+        self.rook_src = rook_src
+        self.rook_dst = rook_dst
+        self.board = board_obj
+
+    def __repr__(self):
+        return f"Move({self.pgn})"
+
+    @property
+    def is_killing(self) -> bool:
+        return self.killed != type(None)
+
+    @property
+    def is_castling(self) -> bool:
+        return self.piece == King and self.rook_src
+
+    @property
+    def is_promotion(self) -> bool:
+        return self.piece == Pawn and bool(self.new_piece)
+
+    @property
+    def enpassant_pos(self) -> list[Optional[BoardPoint]]:
+        if self.piece == Pawn and abs(self.src[1] - self.dst[1]) == 2:
+            return [self.dst, BoardPoint(self.dst[0], (self.src[1] + self.dst[1]) // 2)]
+        return [None, None]
+
+    @property
+    def type(self) -> str:
+        if self.is_killing and self.is_promotion:
+            return "killing-promotion"
+        elif self.is_promotion:
+            return "promotion"
+        elif self.is_killing:
+            return "killing"
+        elif self.is_castling:
+            return "castling"
+        return "normal"
+
+    @property
+    def opponent_state(self) -> str:
+        king = self.board[King, not self.board.is_white_turn][0]
+        if king.in_checkmate():
+            return "checkmate"
+        elif king.in_check():
+            return "check"
+        return "normal"
+
+    @property
+    def pgn(self, language_code: str = "en") -> str:
+        if self.is_castling:
+            return "-".join(["O"] * abs(self.rook_src[0] - self.rook_dst[0]))
+        move = ("x" if self.is_killing else "") + encode_pos(self.dst)
         positions = []
-        direction = 1 if self.is_white else -1
-        if [self.pos[0], self.pos[1] + direction] not in [
-            i.pos for i in enemies + allies
-        ]:
-            positions.append([self.pos[0], self.pos[1] + direction])
-            if not self.moved and [self.pos[0], self.pos[1] + direction * 2] not in [
-                i.pos for i in enemies
-            ]:
-                positions.append([self.pos[0], self.pos[1] + direction * 2])
+        for pos in self.piece.get_all_moves(
+            self.dst, self.board.is_white_turn, is_killing=self.is_killing
+        ):
+            piece = self.board[pos]
+            if type(piece) == self.piece and piece.is_white == self.board.is_white_turn:
+                positions.append(piece.pos)
 
-        if [self.pos[0] + 1, self.pos[1] + direction] in [i.pos for i in enemies] + [
-            self.match.enpassant_pos[1]
-        ]:
-            positions.append([self.pos[0] + 1, self.pos[1] + direction])
+        if len(positions) > 1:
+            if len({i[0] for i in positions}) == len([i[0] for i in positions]):
+                move = encode_pos(self.src)[0] + move
+            else:
+                move = encode_pos(self.src)[1] + move
 
-        if [self.pos[0] - 1, self.pos[1] + direction] in [i.pos for i in enemies] + [
-            self.match.enpassant_pos[1]
-        ]:
-            positions.append([self.pos[0] - 1, self.pos[1] + direction])
+        move = PGNSYMBOLS[language_code][self.piece.__name__] + move
+        if self.is_promotion:
+            move += "=" + PGNSYMBOLS[language_code][self.new_piece.__name__]
+        move += {"normal": "", "check": "+", "checkmate": "#"}[self.opponent_state]
 
-        moves = []
-        for move in positions:
-            if in_bounds(move) and move not in [i.pos for i in allies]:
-                if move[1] in [0, 7]:
-                    moves.append({"pos": move, "type": "special"})
-                else:
-                    moves.append(
-                        {
-                            "pos": move,
-                            "type": "killing"
-                            if move
-                            in [i.pos for i in enemies] + [self.match.enpassant_pos[1]]
-                            else "normal",
-                        }
-                    )
+        return move
 
-        return moves
+    def copy(self, **params) -> "Move":
+        defaults = {
+            "board_obj": self.board,
+            "src": self.src,
+            "dst": self.dst,
+            "piece": self.piece,
+            "killed": self.killed,
+            "rook_src": self.rook_src,
+            "rook_dst": self.rook_dst,
+            "new_piece": self.new_piece,
+        }
 
-    def move(self, pos):
-        old_pos = self.pos
-        killed = super().move(pos)
-        if abs(old_pos[1] - pos[1]) == 2:
-            self.match.enpassant_pos = [pos, [pos[0], (pos[1] + old_pos[1]) // 2]]
-
-        return killed
+        return type(self)(**(defaults | params))
 
 
-class Knight(BaseFigure):
-    name = "Конь"
-    fen_symbol = ["n", "N"]
-
-    def get_moves(self):
-        allies, enemies = (
-            (self.match.whites, self.match.blacks)
-            if self.is_white
-            else (self.match.blacks, self.match.whites)
-        )
-        moves = []
-        for move in [
-            [2, -1],
-            [2, 1],
-            [1, 2],
-            [1, -2],
-            [-1, 2],
-            [-1, -2],
-            [-2, 1],
-            [-2, -1],
-        ]:
-            move = [a + b for a, b in zip(move, self.pos)]
-            if in_bounds(move) and move not in [i.pos for i in allies]:
-                moves.append(
-                    {
-                        "pos": move,
-                        "type": "killing"
-                        if move
-                        in [i.pos for i in enemies] + [self.match.enpassant_pos[1]]
-                        else "normal",
-                    }
-                )
-
-        return moves
-
-
-class Rook(BaseFigure):
-    name = "Ладья"
-    fen_symbol = ["r", "R"]
-
-    def get_moves(self):
-        allies, enemies = (
-            (self.match.whites, self.match.blacks)
-            if self.is_white
-            else (self.match.blacks, self.match.whites)
-        )
-        moves = []
-        for move_seq in [
-            zip(range(1, 8), [0] * 7),
-            zip(range(-1, -8, -1), [0] * 7),
-            zip([0] * 7, range(1, 8)),
-            zip([0] * 7, range(-1, -8, -1)),
-        ]:
-            for move in move_seq:
-                move = [a + b for a, b in zip(self.pos, move)]
-                if move in [i.pos for i in allies] or not in_bounds(move):
-                    break
-                elif move in [i.pos for i in enemies] + [self.match.enpassant_pos[1]]:
-                    moves.append({"pos": move, "type": "killing"})
-                    break
-                else:
-                    moves.append({"pos": move, "type": "normal"})
-
-        return moves
-
-
-class Bishop(BaseFigure):
-    name = "Слон"
-    fen_symbol = ["b", "B"]
-
-    def get_moves(self):
-        allies, enemies = (
-            (self.match.whites, self.match.blacks)
-            if self.is_white
-            else (self.match.blacks, self.match.whites)
-        )
-        moves = []
-        for move_seq in [
-            zip(range(1, 8), range(1, 8)),
-            zip(range(-1, -8, -1), range(-1, -8, -1)),
-            zip(range(-1, -8, -1), range(1, 8)),
-            zip(range(1, 8), range(-1, -8, -1)),
-        ]:
-            for move in move_seq:
-                move = [a + b for a, b in zip(self.pos, move)]
-                if move in [i.pos for i in allies] or not in_bounds(move):
-                    break
-                elif move in [i.pos for i in enemies] + [self.match.enpassant_pos[1]]:
-                    moves.append({"pos": move, "type": "killing"})
-                    break
-                else:
-                    moves.append({"pos": move, "type": "normal"})
-        return moves
-
-
-class Queen(BaseFigure):
-    name = "Ферзь"
-    fen_symbol = ["q", "Q"]
-
-    def get_moves(self):
-        return Bishop.get_moves(self) + Rook.get_moves(self)
-
-
-class King(BaseFigure):
-    name = "Король"
-    fen_symbol = ["k", "K"]
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.can_castle = True
-
-    def move(self, *args, **kwargs):
-        super().move(*args, **kwargs)
-        self.can_castle = False
-
-    def get_moves(self, for_fen=False):
-        allies, enemies = (
-            (self.match.whites, self.match.blacks)
-            if self.is_white
-            else (self.match.blacks, self.match.whites)
-        )
-        moves = []
-        for x in [-1, 0, 1]:
-            for y in [-1, 0, 1]:
-                move = [self.pos[0] + x, self.pos[1] + y]
-                if in_bounds(move) and move not in [i.pos for i in allies]:
-                    moves.append(
-                        {
-                            "pos": move,
-                            "type": "killing"
-                            if move
-                            in [i.pos for i in enemies] + [self.match.enpassant_pos[1]]
-                            else "normal",
-                        }
-                    )
-        if self.can_castle:
-            Y = 0 if self.is_white else 7
-            a_rook = self.match[[0, Y]]
-            h_rook = self.match[[7, Y]]
-            if (
-                all([not self.match[[x, Y]] or for_fen for x in [1, 2, 3]])
-                and a_rook
-                and not a_rook.moved
-            ):
-                moves.append({"pos": [2, Y], "type": "special"})
-            if (
-                all([not self.match[[x, Y]] or for_fen for x in [5, 6]])
-                and h_rook
-                and not h_rook.moved
-            ):
-                moves.append({"pos": [6, Y], "type": "special"})
-        return moves
-
-    def in_checkmate(self):
-        allies = self.match.whites if self.is_white else self.match.blacks
-
-        checks = []
-        for figure in allies:
-            actual_pos = figure.pos
-            for move in figure.get_moves():
-                killed = self.match[move["pos"]]
-                if killed:
-                    del self.match[move["pos"]]
-                figure.pos = move["pos"]
-
-                checks.append(self.in_check())
-
-                figure.pos = actual_pos
-                if killed:
-                    self.match[move["pos"]] = killed
-
-        return all(checks) if checks else False
-
-    def in_check(self):
-        enemies = self.match.blacks if self.is_white else self.match.whites
-        enemy_moves = itertools.chain(
-            *[i.get_moves() for i in enemies]
-        )
-
-        res = self.pos in [i["pos"] for i in enemy_moves]
-        self.can_castle = not res
-        return res
-
-
-class BaseMatch:
-    WRONG_PERSON_MSG = "Сейчас не ваш ход!"
-    db = None
-
-    def __init__(self, bot=None, fen=STARTPOS, id=None):
-        self.init_msg_text = None
-        self.bot = bot
-        self.whites = []
-        self.blacks = []
-        self.states = []
-        self.finished = False
-        self.id = id if id else "".join(random.choices(IDSAMPLE, k=8))
-        self.image_filename = f"chess-{self.id}.jpg"
-        self.video_filename = f"chess-{self.id}.mp4"
+class BoardInfo:
+    @classmethod
+    def from_fen(cls, fen: str, **kwargs) -> None:
+        res = []
         (
             board,
-            self.is_white_turn,
+            is_white_turn,
             castlings,
-            self.enpassant_pos,
-            self.empty_halfturns,
-            self.turn,
-            check_pos,
-            prev_pos_iter,
-        ) = [int(i) - 1 if i.isdigit() else i for i in fen.split(" ")]
+            enpassant_pos,
+            empty_halfturns,
+            turn,
+        ) = [int(i) if i.isdigit() else i for i in fen.split(" ")]
 
-        self.is_white_turn = self.is_white_turn != "w"
+        is_white_turn = is_white_turn == "w"
 
-        if self.enpassant_pos == "-":
-            self.enpassant_pos = [None, None]
+        if enpassant_pos == "-":
+            enpassant_pos = [None, None]
         else:
-            self.enpassant_pos = decode_pos(self.enpassant_pos)
-            self.enpassant_pos = [
-                [self.enpassant_pos[0], int((self.enpassant_pos[1] + 4.5) // 2)],
-                self.enpassant_pos,
+            enpassant_pos = decode_pos(enpassant_pos)
+            enpassant_pos = [
+                [enpassant_pos[0], int((enpassant_pos[1] + 4.5) // 2)],
+                enpassant_pos,
             ]
 
         for (column, line), char in decode_fen(board).items():
-            new = eval(FENSYMBOLS[char.lower()])([column, line], self, char.isupper())
+            new = eval(FENSYMBOLS[char.lower()])(
+                BoardPoint(column, line), None, char.isupper()
+            )
             K = "K" if new.is_white else "k"
             Q = "Q" if new.is_white else "q"
             if type(new) == King and K not in castlings and Q not in castlings:
@@ -481,40 +378,503 @@ class BaseMatch:
                 and new.pos != [7, 0 if new.is_white else 7]
             ):
                 new.moved = True
-            getattr(self, "whites" if new.is_white else "blacks").append(new)
+            res.append(new)
 
-    def __getitem__(self, key):
-        for figure in self.whites + self.blacks:
-            if figure.pos == key:
-                return figure
+        return cls(
+            res,
+            is_white_turn=is_white_turn,
+            enpassant_pos=enpassant_pos,
+            empty_halfturns=empty_halfturns,
+            turn=turn,
+            **kwargs,
+        )
 
-    def __setitem__(self, key, value):
-        if isinstance(value, list):
-            for figure in self.whites + self.blacks:
-                if figure.pos == key:
-                    figure.pos = value
-        elif isinstance(value, BaseFigure):
-            if self[key]:
-                del self[key]
-            (self.whites if value.is_white else self.blacks).append(value)
-        else:
-            raise TypeError(
-                f"Values can only be subclasses of list or BaseFigure (got {type(value).__name__})"
+    def __new__(
+        cls,
+        board: list["BasePiece"],
+        is_white_turn: bool = True,
+        enpassant_pos: list[BoardPoint] = [None, None],
+        empty_halfturns: int = 0,
+        turn: int = 1,
+        **kwargs,
+    ):
+        self = object.__new__(cls)
+
+        self.board = board
+        self.is_white_turn = is_white_turn
+        self.enpassant_pos = enpassant_pos
+        self.empty_halfturns = empty_halfturns
+        self.turn = turn
+
+        for piece in board:
+            piece.board = self
+
+        return self
+
+    def __repr__(self):
+        return f"BoardInfo({self.fen})"
+
+    def __eq__(self, other: "BoardInfo"):
+        for attr in ["__class__", "board", "castlings", "enpassant_pos"]:
+            if getattr(self, attr) != getattr(other, attr):
+                return False
+        return True
+
+    def __sub__(self, other: "BoardInfo") -> Move:
+        src_pieces = []
+        for piece in other.board:
+            if piece not in self.board:
+                src_pieces.append(piece)
+
+        dst_pieces = []
+        for piece in self.board:
+            if piece not in other.board:
+                dst_pieces.append(piece)
+
+        if len(dst_pieces) == 2:
+            _, src_king = sorted(src_pieces, key=lambda x: x.value)
+            _, dst_king = sorted(dst_pieces, key=lambda x: x.value)
+            return src_king.create_move(dst_king.pos)
+
+        src_piece = sorted(src_pieces, key=lambda x: int(x.is_white == other.is_white_turn))[-1]
+        return src_piece.create_move(
+            dst_pieces[0].pos,
+            new_piece=type(dst_pieces[0]) if type(dst_pieces[0])!=type(src_piece) else None
+        )        
+
+    def __add__(self, move: Move) -> "BoardInfo":
+        new = self.copy(
+            turn=self.turn + (1 if not self.is_white_turn else 0),
+            is_white_turn=not self.is_white_turn,
+            empty_halfturns=0
+            if move.is_killing or move.piece == Pawn
+            else self.empty_halfturns + 1,
+            enpassant_pos=move.enpassant_pos,
+        )
+        piece = new[move.src]
+
+        if move.is_killing:
+            del new[move.dst]
+        if move.is_promotion:
+            del new[move.src]
+            new.board.append(move.new_piece(piece.pos, self, self.is_white_turn))
+        if move.is_castling:
+            new[move.rook_src] = move.rook_dst
+
+        new[move.src] = move.dst
+
+        return new
+
+    def __getitem__(self, *keys):
+        keys = keys[0]
+        if type(keys) == int:
+            return self.get_by_pos(keys, None)
+        elif type(keys) == type:
+            return self.get_by_type(keys, None)
+        elif issubclass(type(keys), tuple):
+            if type(keys[0]) == int:
+                return self.get_by_pos(*keys)
+            elif type(keys[0]) == type or type(keys[1]) == bool:
+                return self.get_by_type(*keys)
+            elif keys == (None, None):
+                return self.board
+        raise TypeError(f"Unknown argument: {keys}")
+
+    def __setitem__(self, pos: BoardPoint, new_pos: BoardPoint):
+        self[pos]._move(new_pos)
+
+    def __delitem__(self, pos):
+        for index in range(len(self.board)):
+            if self.board[index].pos == pos:
+                del self.board[index]
+                break
+
+    @property
+    def whites(self) -> list["BasePiece"]:
+        return list(filter(lambda x: x.is_white, self.board))
+
+    @property
+    def blacks(self) -> list["BasePiece"]:
+        return list(filter(lambda x: not x.is_white, self.board))
+
+    @property
+    def castlings(self) -> str:
+        res = ""
+        white_king = self[King, True][0]
+        black_king = self[King, False][0]
+        if not white_king.moved:
+            white_king_moves = [i.dst for i in white_king.get_moves(for_fen=True)]
+            if BoardPoint(6, 0) in white_king_moves:
+                res += "K"
+            if BoardPoint(2, 0) in white_king_moves:
+                res += "Q"
+        if not black_king.moved:
+            black_king_moves = [i.dst for i in black_king.get_moves(for_fen=True)]
+            if BoardPoint(6, 7) in black_king_moves:
+                res += "k"
+            if BoardPoint(2, 7) in black_king_moves:
+                res += "q"
+        return res if res else "-"
+
+    @property
+    def fen(self):
+        board = []
+        for row in range(7, -1, -1):
+            board.append("")
+            for column in range(0, 8):
+                piece = self[column, row]
+                if piece:
+                    board[-1] += piece.fen_symbol
+                elif board[-1] and board[-1][-1].isdigit():
+                    board[-1] = board[-1][:-1] + str(int(board[-1][-1]) + 1)
+                else:
+                    board[-1] += "1"
+
+        return " ".join(
+            (
+                "/".join(board),
+                "w" if self.is_white_turn else "b",
+                self.castlings,
+                encode_pos(self.enpassant_pos[1]) if self.enpassant_pos[0] else "-",
+                str(self.empty_halfturns),
+                str(self.turn),
             )
+        )
 
-    def __delitem__(self, key):
-        for index, figure in enumerate(
-            self.whites if self[key].is_white else self.blacks
-        ):
-            if figure.pos == key:
-                del (self.whites if self[key].is_white else self.blacks)[index]
+    def copy(self, **new_params):
+        params = {
+            "is_white_turn": self.is_white_turn,
+            "enpassant_pos": self.enpassant_pos,
+            "empty_halfturns": self.empty_halfturns,
+            "turn": self.turn,
+        }
+        return type(self)([piece.copy() for piece in self.board], **(params | new_params))
 
-    def _keyboard(self, seq, expected_uid, head_button=False):
+    def get_by_pos(self, column, row):
+        res = []
+        for piece in self.board:
+            if (piece.pos[0] == column or column is None) and (
+                piece.pos[1] == row or row is None
+            ):
+                res.append(piece)
+
+        if column != None and row != None:
+            return res[0] if res else None
+        else:
+            return res
+
+    def get_by_type(self, piece_type: type, is_white: bool):
+        res = []
+        for piece in self.board:
+            if (type(piece) == piece_type or piece_type is None) and (
+                piece.is_white == is_white or is_white is None
+            ):
+                res.append(piece)
+
+        return res
+
+    def is_legal(self, move: Move):
+        test_obj = self + move
+        return not test_obj[King, self.is_white_turn][0].in_check()
+
+
+class BasePiece:
+    name: str
+    fen_symbol: list[str]
+    pgn_symbol: dict[str, str]
+    move_diffs: Union[tuple[list[int]], tuple[tuple[list[int]]]]
+    value: int
+
+    def __init__(self, pos: BoardPoint, board: BoardInfo, is_white: bool):
+        self.image = IMAGES[type(self).__name__][int(is_white)]
+        self.pos = pos
+        self.is_white = is_white
+        self.board = board
+        self.fen_symbol = self.fen_symbol[int(is_white)]
+        self.moved = False
+
+    def __str__(self):
+        return f"{self.name} на {encode_pos(self.pos)}"
+
+    def __repr__(self):
+        return f"<{type(self).__name__}({self.pos}, {self.is_white})>"
+
+    def __eq__(self, other: "BasePiece"):
+        return (
+            type(self) == type(other)
+            and self.pos == other.pos
+            and self.is_white == other.is_white
+        )
+
+    @property
+    def allied_pieces(self) -> list["BasePiece"]:
+        return self.board.whites if self.is_white else self.board.blacks
+
+    @property
+    def enemy_pieces(self) -> list["BasePiece"]:
+        return self.board.blacks if self.is_white else self.board.whites
+
+    def _move(self, new_pos: BoardPoint):
+        self.pos = new_pos
+        self.moved = True
+
+    def get_moves(self, **kwargs) -> list[Move]:
+        return []
+
+    @classmethod
+    def get_all_moves(
+        cls, pos: BoardPoint, is_white: bool, diffs: List = tuple(), **kwargs
+    ) -> list[BoardPoint]:
+        res = []
+        for diff in diffs if diffs else cls.move_diffs:
+            res.append(BoardPoint(*[i + d for i, d in zip(pos, diff)]))
+
+        return list(filter(in_bounds, res))
+
+    def remove(self) -> None:
+        del self.board[self.pos]
+
+    def create_move(self, dst: BoardPoint, new_piece: Type["BasePiece"] = None) -> Move:
+        piece = type(self)
+        kwargs = {"killed": type(self.board[dst])}
+        if piece == King:
+            if self.pos.column == 4 and dst.column == 6:  # kingside castling
+                kwargs["rook_src"] = BoardPoint(7, self.pos.row)
+                kwargs["rook_dst"] = BoardPoint(5, dst.row)
+            elif self.pos.column == 4 and dst.column == 2:  # queenside castling
+                kwargs["rook_src"] = BoardPoint(0, self.pos.row)
+                kwargs["rook_dst"] = BoardPoint(3, dst.row)
+
+        return Move(self.board, self.pos, dst, piece, new_piece=new_piece, **kwargs)
+
+    def copy(self) -> "BasePiece":
+        new = type(self)(self.pos, self.board, self.is_white)
+        new.moved = self.moved
+        return new
+
+
+class Pawn(BasePiece):
+    name = "Пешка"
+    fen_symbol = ["p", "P"]
+    pgn_symbol = {"emoji": "", "ru": "", "en": ""}
+    move_diffs = ([0, -1], [0, -2], [1, -1], [-1, -1])
+    value = 1
+
+    @classmethod
+    def get_all_moves(
+        cls: type, pos: BoardPoint, is_white: bool, is_killing: bool = False, **kwargs
+    ) -> list[BoardPoint]:
+        diffs = cls.move_diffs
+        if not is_killing:
+            diffs = diffs[:2]
+        if not is_white:
+            diffs = [[i[0], i[1] * -1] for i in diffs]
+
+        res = []
+        for diff in diffs:
+            res.append(BoardPoint(*[i + d for i, d in zip(pos, diff)]))
+
+        return list(filter(in_bounds, res))
+
+    def get_moves(self, **kwargs) -> list[Move]:
+        positions = []
+        direction = 1 if self.is_white else -1
+        if BoardPoint(self.pos.column, self.pos.row + direction) not in [
+            i.pos for i in self.enemy_pieces
+        ]:
+            positions.append(BoardPoint(self.pos.column, self.pos.row + direction))
+            if self.pos.row == (1 if self.is_white else 6) and BoardPoint(
+                self.pos.column, self.pos.row + direction * 2
+            ) not in [i.pos for i in self.enemy_pieces]:
+                positions.append(
+                    BoardPoint(self.pos.column, self.pos.row + direction * 2)
+                )
+
+        if BoardPoint(self.pos.column + 1, self.pos.row + direction) in [
+            i.pos for i in self.enemy_pieces
+        ] + [self.board.enpassant_pos[1]]:
+            positions.append(BoardPoint(self.pos.column + 1, self.pos.row + direction))
+
+        if BoardPoint(self.pos.column - 1, self.pos.row + direction) in [
+            i.pos for i in self.enemy_pieces
+        ] + [self.board.enpassant_pos[1]]:
+            positions.append(BoardPoint(self.pos.column - 1, self.pos.row + direction))
+
+        moves = []
+        for move in positions:
+            if in_bounds(move) and move not in [i.pos for i in self.allied_pieces]:
+                moves.append(self.create_move(move))
+
+        return moves
+
+
+class Knight(BasePiece):
+    name = "Конь"
+    fen_symbol = ["n", "N"]
+    move_diffs = [
+        [2, -1],
+        [2, 1],
+        [1, 2],
+        [1, -2],
+        [-1, 2],
+        [-1, -2],
+        [-2, 1],
+        [-2, -1],
+    ]
+    value = 3
+
+    def get_moves(self, **kwargs) -> list[Move]:
+        moves = []
+        for move in self.get_all_moves(self.pos, self.is_white):
+            if in_bounds(move) and move not in [i.pos for i in self.allied_pieces]:
+                moves.append(self.create_move(move))
+
+        return moves
+
+
+class Rook(BasePiece):
+    name = "Ладья"
+    fen_symbol = ["r", "R"]
+    pgn = {"emoji": "♜", "ru": "Л", "en": "R"}
+    move_diffs = (
+        tuple(zip(range(1, 8), [0] * 7)),
+        tuple(zip(range(-1, -8, -1), [0] * 7)),
+        tuple(zip([0] * 7, range(1, 8))),
+        tuple(zip([0] * 7, range(-1, -8, -1))),
+    )
+    value = 5
+
+    @classmethod
+    def get_all_moves(cls, pos, is_white, flat=True, **kwargs) -> list[BoardPoint]:
+        res = [
+            BasePiece.get_all_moves(pos, is_white, diffs=seq) for seq in cls.move_diffs
+        ]
+        if flat:
+            return list(itertools.chain(*res))
+        else:
+            return res
+
+    def get_moves(self, **kwargs) -> list[Move]:
+        moves = []
+        for move_seq in self.get_all_moves(self.pos, self.is_white, flat=False):
+            for move in move_seq:
+                if move in [i.pos for i in self.allied_pieces] or not in_bounds(move):
+                    break
+                elif move in [i.pos for i in self.enemy_pieces] + [
+                    self.board.enpassant_pos[1]
+                ]:
+                    moves.append(self.create_move(move))
+                    break
+                else:
+                    moves.append(self.create_move(move))
+
+        return moves
+
+
+class Bishop(Rook):
+    name = "Слон"
+    fen_symbol = ["b", "B"]
+    pgn_symbol = {"emoji": "♝", "ru": "С", "en": "B"}
+    move_diffs = (
+        tuple(zip(range(1, 8), range(1, 8))),
+        tuple(zip(range(-1, -8, -1), range(-1, -8, -1))),
+        tuple(zip(range(-1, -8, -1), range(1, 8))),
+        tuple(zip(range(1, 8), range(-1, -8, -1))),
+    )
+    value = 3
+
+
+class Queen(Rook):
+    name = "Ферзь"
+    fen_symbol = ["q", "Q"]
+    pgn_symbol = {"emoji": "♛", "ru": "Ф", "en": "Q"}
+    value = 8
+
+    @classmethod
+    def get_all_moves(self, pos, is_white, flat=True, **kwargs):
+        return Bishop.get_all_moves(pos, is_white, flat=flat) + super().get_all_moves(
+            pos, is_white, flat=flat
+        )
+
+
+class King(BasePiece):
+    name = "Король"
+    fen_symbol = ["k", "K"]
+    pgn_symbol = {"emoji": "♚", "ru": "Кр", "en": "K"}
+    move_diffs = tuple(
+        [i for i in itertools.product([1, 0, -1], [1, 0, -1]) if i != (0, 0)]
+    )
+    value = 99
+
+    def get_moves(self, for_fen: bool = False, castling: bool = True) -> list[Move]:
+        moves = []
+        for move in self.get_all_moves(self.pos, self.is_white):
+            if in_bounds(move) and move not in [i.pos for i in self.allied_pieces]:
+                moves.append(move)
+
+        if castling and not self.moved and not self.in_check():
+            Y = 0 if self.is_white else 7
+            a_rook = self.board[0, Y]
+            h_rook = self.board[7, Y]
+            if (
+                all([not self.board[x, Y] or for_fen for x in [1, 2, 3]])
+                and a_rook
+                and not a_rook.moved
+            ):
+                moves.append(BoardPoint(2, Y))
+            if (
+                all([not self.board[x, Y] or for_fen for x in [5, 6]])
+                and h_rook
+                and not h_rook.moved
+            ):
+                moves.append(BoardPoint(6, Y))
+
+        return [self.create_move(move) for move in moves]
+
+    def in_checkmate(self):
+        checks = []
+        for piece in self.allied_pieces:
+            for move in piece.get_moves():
+                checks.append(move)
+
+        return (
+            next(filter(self.board.is_legal, checks), None) is None and self.in_check()
+        )
+
+    def in_check(self):
+        enemy_moves = itertools.chain(
+            *[i.get_moves(castling=False) for i in self.enemy_pieces]
+        )
+
+        return self.pos in [i.dst for i in enemy_moves]
+
+
+class BaseMatch:
+    WRONG_PERSON_MSG = "Сейчас не ваш ход!"
+    db = None
+
+    def __init__(self, bot=None, id=None):
+        self.init_msg_text: Optional[str] = None
+        self.last_move: Optional[Move] = None
+        self.bot: Bot = bot
+        self.states: list[BoardInfo] = [BoardInfo.from_fen(STARTPOS)]
+        self.finished: bool = False
+        self.id: str = id if id else "".join(random.choices(IDSAMPLE, k=8))
+        self.image_filename: str = f"chess-{self.id}.jpg"
+        self.video_filename: str = f"chess-{self.id}.mp4"
+        self.game_filename: str = f"telegram-chess-bot-{self.id}.pgn"
+
+    def _keyboard(
+        self,
+        seq: list[dict[str, Union[str, BoardPoint]]],
+        expected_uid: int,
+        head_item: bool = False,
+    ) -> Optional[InlineKeyboardMarkup]:
         res = []
         for button in seq:
             data = []
             for argument in button["data"]:
-                if type(argument) in [list, tuple]:
+                if type(argument) == BoardPoint:
                     data.append(encode_pos(argument))
                 elif argument == None:
                     data.append("")
@@ -528,152 +888,123 @@ class BaseMatch:
             )
 
         if res:
-            return InlineKeyboardMarkup(_group_buttons(res, 2, head_button=head_button))
+            return InlineKeyboardMarkup(_group_items(res, 2, head_item=head_item))
         else:
             return None
 
-    def to_dict(self):
-        return {"type": "Base", "states": self.states}
+    def get_moves(self) -> list[Move]:
+        res = [None]
+        for index in range(1, len(self.states)):
+            res.append(self.states[index] - self.states[index - 1])
+
+        return res
+
+    def to_dict(self) -> JSON:
+        return {"type": "Base", "states": [board.fen for board in self.states]}
 
     @property
-    def figures(self):
-        return (
-            (self.whites, self.blacks)
-            if self.is_white_turn
-            else (self.blacks, self.whites)
-        )
+    def board(self) -> BoardInfo:
+        return self.states[-1]
 
-    def get_king(self, is_white):
-        for figure in self.whites if is_white else self.blacks:
-            if type(figure) == King:
-                return figure
+    @property
+    def pieces(self) -> tuple[list[BasePiece], list[BasePiece]]:
+        return (self.board.whites, self.board.blacks) if self.board.is_white_turn else (self.board.blacks, self.board.whites)
 
-    def init_turn(self, move=[None, None], promotion=""):
-        figure = self[move[0]]
-        turn_info = {"figure": figure}
-        if figure:
-            turn_info.update({"from": encode_pos(move[0]), "to": encode_pos(move[1])})
-            killed = self[move[0]].move(move[1])
-            turn_info.update({"killed": killed})
-
-            y = 0 if figure.is_white else 7
-            if type(figure) == King and move[0][0] - move[1][0] == -2:
-                self[[7, y]].move([5, y])
-                turn_info["castling"] = "kingside"
-            elif type(figure) == King and move[0][0] - move[1][0] == 2:
-                self[[0, y]].move([3, y])
-                turn_info["castling"] = "queenside"
-            else:
-                turn_info["castling"] = None
-
-            if promotion:
-                self[move[1]] = eval(FENSYMBOLS[promotion])(
-                    move[1], self, figure.is_white
-                )
-                self[move[1]].moved = True
-                turn_info["promotion"] = promotion
-            else:
-                turn_info["promotion"] = None
-
-        else:
-            turn_info.update({"killed": None, "castling": None, "promotion": None})
-
-        cur_king = self.get_king(not self.is_white_turn)
+    def get_state(self) -> Optional[str]:
+        cur_king = self.board[King, self.board.is_white_turn][0]
         if cur_king.in_checkmate():
-            turn_info["player_gamestate"] = "checkmate"
-            self.finished = True
-        elif cur_king.in_check():
-            turn_info["player_gamestate"] = "check"
-        elif self.empty_halfturns == 50:
-            turn_info["player_gamestate"] = "stalemate"
-            self.finished = True
-        else:
-            turn_info["player_gamestate"] = "normal"
+            return "checkmate"
+        if cur_king.in_check():
+            return "check"
 
-        self.is_white_turn = not self.is_white_turn
-        if self.is_white_turn:
-            self.turn += 1
-        if turn_info["killed"] or type(turn_info["figure"]) == Pawn:
-            self.empty_halfturns = 0
-        else:
-            self.empty_halfturns += 1
+        if self.board.empty_halfturns >= 50:
+            return "50-move-draw"
+        cur_side_moves = [piece.get_moves() for piece in cur_king.allied_pieces]
+        if len(self.states) >= 8:
+            for move in itertools.chain(
+                *(
+                    [piece.get_moves() for piece in cur_king.enemy_pieces]
+                    + cur_side_moves
+                )
+            ):
+                test_board = self.board + move
+                if test_board == self.states[-8]:
+                    return "3fold-repetition-draw"
+        if next(itertools.chain(*cur_side_moves), None) is None:
+            return "stalemate-draw"
 
-        self.states.append(self.fen_string())
+        return "normal"
 
-        return turn_info
-        
-    def decode_input(self, args):
-        return [
-            (
-                decode_pos(i)
-                if type(i) == str
-                and len(i) == 2
-                and not i[0].isdigit()
-                and i[1].isdigit()
-                else i
-            )
-            for i in args
-        ]
+    def init_turn(self, move: Move = None) -> None:
+        if move:
+            self.states.append(self.states[-1] + move)
+        self.last_move = move
 
     def visualise_board(
-        self, selected=[None, None], pointers=[], fen="", return_bytes=True
-    ):
-        board = BOARD_IMG.copy()
-        fen = fen if fen else self.states[-1]
-        fen_board, *_, check_pos, prev_pos_iter = fen.split(" ")
-        selected = tuple(selected)
-
-        for pos, char in decode_fen(fen_board).items():
-            image = IMAGES[FENSYMBOLS[char.lower()]][char.isupper()]
-            if pos == selected:
+        self,
+        board: BoardInfo=None,
+        selected: BoardPoint=None,
+        possible_moves: list[Move] = [],
+        prev_move: Move=-1,
+        return_bytes=True,
+    ) -> Union[bytes, numpy.ndarray]:
+        board_img = BOARD_IMG.copy()
+        board = board if board else self.board
+        prev_move = prev_move if prev_move != -1 else self.last_move
+        logging.debug(repr(prev_move))
+        for piece in board.board:
+            if piece.pos == selected:
                 cv_utils.fill(
                     cv_utils.from_hex("#00cc36"),
-                    board,
-                    topleft=cv_utils.image_pos(pos, image.shape[:2]),
-                    mask=image,
+                    board_img,
+                    topleft=cv_utils.image_pos(piece.pos, piece.image.shape[:2]),
+                    mask=piece.image,
                 )
             else:
-                cv_utils.paste(image, board, cv_utils.image_pos(pos, image.shape[:2]))
+                cv_utils.paste(
+                    piece.image,
+                    board_img,
+                    cv_utils.image_pos(piece.pos, piece.image.shape[:2]),
+                )
 
-        for pointer in pointers:
+        for new_move in possible_moves:
             cv_utils.fill(
-                cv_utils.from_hex(POINTER_COLORS[pointer["type"]]),
-                board,
-                topleft=cv_utils.image_pos(pointer["pos"], POINTER_IMG.shape[:2]),
+                cv_utils.from_hex(MOVETYPE_COLORS[new_move.type]),
+                board_img,
+                topleft=cv_utils.image_pos(new_move.dst, POINTER_IMG.shape[:2]),
                 mask=POINTER_IMG,
             )
 
-        if check_pos != "-":
-            cv_utils.fill(
-                cv_utils.from_hex(POINTER_COLORS["killing"]),
-                board,
-                topleft=cv_utils.image_pos(
-                    decode_pos(check_pos), INCOMING_POINTER_IMG.shape[:2]
-                ),
-                mask=INCOMING_POINTER_IMG,
-            )
-
-        if prev_pos_iter != "-":
-            for move in prev_pos_iter.split("/"):
+        for king in board[King]:
+            if king.in_check():
                 cv_utils.fill(
-                    cv_utils.from_hex(POINTER_COLORS["normal"]),
-                    board,
+                    cv_utils.from_hex(MOVETYPE_COLORS["killing"]),
+                    board_img,
                     topleft=cv_utils.image_pos(
-                        decode_pos(move), INCOMING_POINTER_IMG.shape[:2]
+                        king.pos, INCOMING_POINTER_IMG.shape[:2]
                     ),
                     mask=INCOMING_POINTER_IMG,
                 )
 
-        return cv2.imencode(".jpg", board)[1].tobytes() if return_bytes else board
+        if prev_move:
+            for move in [prev_move.src, prev_move.dst]:
+                cv_utils.fill(
+                    cv_utils.from_hex(MOVETYPE_COLORS["normal"]),
+                    board_img,
+                    topleft=cv_utils.image_pos(move, INCOMING_POINTER_IMG.shape[:2]),
+                    mask=INCOMING_POINTER_IMG,
+                )
 
-    def get_video(self):
+        return cv2.imencode(".jpg", board_img)[1].tobytes() if return_bytes else board_img
+
+    def get_video(self) -> tuple[bytes, bytes]:
         path = os.path.join("images", "temp", self.video_filename)
         writer = cv2.VideoWriter(
             path, cv2.VideoWriter_fourcc(*"mp4v"), 15.0, BOARD_IMG.shape[1::-1]
         )
 
-        for fen in self.states:
-            img_array = self.visualise_board(fen=fen, return_bytes=False)
+        for board, move in zip(self.states, self.get_moves()):
+            img_array = self.visualise_board(board=board, prev_move=move, return_bytes=False)
             for i in range(15):
                 writer.write(img_array)
         for i in range(15):
@@ -685,64 +1016,17 @@ class BaseMatch:
         os.remove(path)
         return video_data, cv2.imencode(".jpg", thumbnail)[1].tobytes()
 
-    def fen_string(self):
-        res = [""] * 8
-
-        for line in range(8):
-            for column in range(8):
-                figure = self[[column, 7 - line]]
-                if figure:
-                    res[line] += figure.fen_symbol
-                else:
-                    if res[line] and res[line][-1].isdigit():
-                        res[line] = res[line][:-1] + str(int(res[line][-1]) + 1)
-                    else:
-                        res[line] += "1"
-        res = ["/".join(res)]
-
-        res.append("w" if self.is_white_turn else "b")
-        res.append("")
-        white_king = self.get_king(True)
-        black_king = self.get_king(False)
-        if not white_king.moved:
-            white_king_moves = [i["pos"] for i in white_king.get_moves(for_fen=True)]
-            if [6, 0] in white_king_moves:
-                res[-1] += "K"
-            if [2, 0] in white_king_moves:
-                res[-1] += "Q"
-        if not black_king.moved:
-            black_king_moves = [i["pos"] for i in black_king.get_moves(for_fen=True)]
-            if [6, 7] in black_king_moves:
-                res[-1] += "k"
-            if [2, 7] in black_king_moves:
-                res[-1] += "q"
-
-        res.append(encode_pos(self.enpassant_pos[1]) if self.enpassant_pos[0] else "-")
-        res.append(str(self.empty_halfturns))
-        res.append(str(self.turn))
-
-        res.append("")
-        for king in [self.get_king(i) for i in (True, False)]:
-            if king.in_check():
-                res[-1] += encode_pos(king.pos)
-
-        diff = fen_diff(self.states[-1].split(" ")[0], res[0]) if self.states else []
-        res.append("/".join([encode_pos(i) for i in diff]))
-        if not res[-1]:
-            res[-1] = "-"
-        return " ".join([(i if i else "-") for i in res])
-
 
 class GroupMatch(BaseMatch):
-    def __init__(self, player1, player2, match_chat, **kwargs):
-        self.player1 = player1
-        self.player2 = player2
-        self.chat_id = match_chat
-        self.msg = None
+    def __init__(self, player1: User, player2: User, match_chat: int, **kwargs):
+        self.player1: User = player1
+        self.player2: User = player2
+        self.chat_id: int = match_chat
+        self.msg: Message = None
         super().__init__(**kwargs)
 
     @classmethod
-    def from_dict(cls, obj, match_id, bot):
+    def from_dict(cls, obj: JSON, match_id: int, bot: Bot) -> "GroupMatch":
         logging.debug(f"Constructing {cls.__name__} object:", obj)
         player1 = User.de_json(obj["player1"] | {"is_bot": False}, bot)
         player2 = User.de_json(obj["player2"] | {"is_bot": False}, bot)
@@ -751,10 +1035,9 @@ class GroupMatch(BaseMatch):
             player2,
             obj["chat_id"],
             bot=bot,
-            fen=obj["states"][-1],
             id=match_id,
         )
-        new.states = obj["states"]
+        new.states = [BoardInfo.from_fen(fen) for fen in obj["states"]]
         new.init_msg_text = obj["msg_text"]
         new.msg = Message(
             obj["msg_id"],
@@ -770,14 +1053,14 @@ class GroupMatch(BaseMatch):
         return new
 
     @property
-    def players(self):
+    def players(self) -> tuple[User, User]:
         return (
             (self.player1, self.player2)
-            if self.is_white_turn
+            if self.board.is_white_turn
             else (self.player2, self.player1)
         )
 
-    def to_dict(self):
+    def to_dict(self) -> JSON:
         res = super().to_dict()
         res.update(
             {
@@ -799,32 +1082,52 @@ class GroupMatch(BaseMatch):
         )
         return res
 
-    def init_turn(self, move=[None, None], turn_info=None, promotion=""):
-        res = (
-            turn_info
-            if turn_info
-            else super().init_turn(move=move, promotion=promotion)
-        )
+    def init_turn(self, move: Move = None) -> None:
+        super().init_turn(move=move)
         player, opponent = self.players
-        if res["player_gamestate"] == "checkmate":
-            msg = f"Игра окончена: шах и мат!\nХодов: {self.turn - 1}.\nПобедитель: {self.db.get_name(opponent)}."
-        elif res["player_gamestate"] == "stalemate":
-            msg = f"Игра окончена: за последние 50 ходов не было убито ни одной фигуры и не сдвинуто ни одной пешки - ничья!\nХодов: {self.turn - 1}"
+        state = self.get_state()
+        self.finished = state != "normal"
+
+        if state == "checkmate":
+            msg = f"""
+Игра окончена: шах и мат!
+Победитель: {self.db.get_name(opponent)}
+Ходов: {self.board.turn - 1}.
+            """
+        elif state == "50-move-draw":
+            msg = f"""
+Игра окончена: за последние 50 ходов не было убито ни одной фигуры и не сдвинуто ни одной пешки.
+Ничья!
+Ходов: {self.board.turn - 1}
+            """
+        elif state == "3fold-repetition-draw":
+            msg = f"""
+Игра окончена: одинаковая позиция доски возникла 3-ий раз подряд.
+Ничья!
+Ходов: {self.board.turn - 1}
+            """
+        elif state == "stalemate-draw":
+            msg = f"""
+Игра окончена: у {"белых" if self.board.is_white_turn else "черных"} не осталось ходов, но их король не под шахом.
+Ничья!
+Ходов: {self.board.turn - 1}
+            """
         else:
-            msg = f"Ход {self.turn}"
-            if res["figure"]:
-                msg += f"\n{res['figure'].name}{' -> '+eval(FENSYMBOLS[res['promotion']]).name if res['promotion'] else ''}: {res['from']} -> {res['to']}"
-                if res["castling"]:
-                    msg += f" ({'Короткая' if res['castling'] == 'kingside' else 'Длинная'} рокировка)"
+            msg = f"Ход {self.board.turn}"
+            if move:
+                msg += f"\n{move.piece.name}{' -> '+move.new_piece.name if move.is_promotion else ''}"
+                msg += f": {encode_pos(move.src)} -> {encode_pos(move.dst)}"
+                if move.is_castling:
+                    msg += f" ({'Короткая' if move.rook_src.column == 7 else 'Длинная'} рокировка)"
+                if move.is_killing:
+                    msg += f"\n{move.killed.name} на {encode_pos(move.dst)} убит"
+                    msg += f"{'а' if move.killed.name in ['Пешка', 'Ладья'] else ''}!"
+                else:
+                    msg += "\n"
             else:
-                msg += "\n"
+                msg += "\n\n"
 
-            if res["killed"]:
-                msg += f"\n{res['killed']} убит{'а' if res['killed'].name in ['Пешка', 'Ладья'] else ''}!"
-            else:
-                msg += "\n"
-
-            if res["player_gamestate"] == "check":
+            if state == "check":
                 msg += "\nИгроку поставлен шах!"
             else:
                 msg += "\n"
@@ -869,10 +1172,9 @@ class GroupMatch(BaseMatch):
                     reply_markup=keyboard,
                 )
 
-    def handle_input(self, args):
-        args = self.decode_input(args)
+    def handle_input(self, args: list[Union[str, int]]) -> None:
         player, opponent = self.players
-        allies, enemies = self.figures
+        allies, _ = self.pieces
         if args[0] == "INIT_MSG":
             self.msg = self.msg.edit_caption(
                 self.init_msg_text,
@@ -886,14 +1188,11 @@ class GroupMatch(BaseMatch):
             )
 
         if args[0] == "TURN":
-            figure_buttons = [{"text": "Назад", "data": ["INIT_MSG"]}]
-            for figure in allies:
-                if next(
-                    filter(figure.is_legal, [i["pos"] for i in figure.get_moves()]),
-                    None,
-                ):
-                    figure_buttons.append(
-                        {"text": str(figure), "data": ["CHOOSE_FIGURE", figure.pos]}
+            piece_buttons = [{"text": "Назад", "data": ["INIT_MSG"]}]
+            for piece in allies:
+                if next(filter(self.board.is_legal, piece.get_moves()), None):
+                    piece_buttons.append(
+                        {"text": str(piece), "data": ["CHOOSE_PIECE", piece.pos]}
                     )
 
             new_text = self.init_msg_text.split("\n")
@@ -905,9 +1204,7 @@ class GroupMatch(BaseMatch):
                     caption="\n".join(new_text),
                     filename=self.image_filename,
                 ),
-                reply_markup=self._keyboard(
-                    figure_buttons, player.id, head_button=True
-                ),
+                reply_markup=self._keyboard(piece_buttons, player.id, head_item=True),
             )
 
         elif args[0] == "SURRENDER":
@@ -918,33 +1215,32 @@ class GroupMatch(BaseMatch):
                     video,
                     caption=f"""
 Игра окончена: {self.db.get_name(player)} сдался.
-Ходов: {self.turn - 1}.
-Победитель: {self.db.get_name(opponent)}.""",
+Победитель: {self.db.get_name(opponent)}.
+Ходов: {self.board.turn - 1}.
+                    """,
                     filename=self.video_filename,
                     thumb=thumb,
                 )
             )
 
-        elif args[0] == "CHOOSE_FIGURE":
+        elif args[0] == "CHOOSE_PIECE":
+            args[1] = decode_pos(args[1])
             dest_buttons = [{"text": "Назад", "data": ["TURN"]}]
-            figure = self[args[1]]
-            moves = list(
-                filter(lambda move: figure.is_legal(move["pos"]), figure.get_moves())
-            )
+            piece = self.board[args[1]]
+            moves = list(filter(self.board.is_legal, piece.get_moves()))
             for move in moves:
-                if move["type"] == "special":
+                if move.is_promotion:
                     dest_buttons.append(
                         {
-                            "text": "⏫" + encode_pos(move["pos"]),
-                            "data": ["PROMOTION_MENU", args[1], move["pos"]],
+                            "text": "⏫" + encode_pos(move.dst),
+                            "data": ["PROMOTION_MENU", args[1], move.dst],
                         }
                     )
                 else:
                     dest_buttons.append(
                         {
-                            "text": ("❌" if move["type"] == "killing" else "")
-                            + encode_pos(move["pos"]),
-                            "data": ["MOVE", args[1], move["pos"]],
+                            "text": MOVETYPE_MARKERS[move.type] + encode_pos(move.dst),
+                            "data": ["MOVE", move.pgn],
                         }
                     )
             new_text = self.init_msg_text.split("\n")
@@ -954,19 +1250,20 @@ class GroupMatch(BaseMatch):
 
             self.msg = self.msg.edit_media(
                 media=InputMediaPhoto(
-                    self.visualise_board(selected=args[1], pointers=moves),
+                    self.visualise_board(selected=args[1], possible_moves=moves),
                     caption="\n".join(new_text),
                     filename=self.image_filename,
                 ),
-                reply_markup=self._keyboard(dest_buttons, player.id, head_button=True),
+                reply_markup=self._keyboard(dest_buttons, player.id, head_item=True),
             )
 
         elif args[0] == "PROMOTION_MENU":
-            figures = [
-                {"text": "Ферзь", "data": ["PROMOTION", args[1], args[2], "q"]},
-                {"text": "Конь", "data": ["PROMOTION", args[1], args[2], "n"]},
-                {"text": "Слон", "data": ["PROMOTION", args[1], args[2], "b"]},
-                {"text": "Ладья", "data": ["PROMOTION", args[1], args[2], "r"]},
+            move = self.board[args[1]].create_move(args[2], new_piece=Queen)
+            pieces = [
+                {"text": "Ферзь", "data": ["MOVE", move.pgn]},
+                {"text": "Конь", "data": ["MOVE", move.copy(new_piece=Knight).pgn]},
+                {"text": "Слон", "data": ["MOVE", move.copy(new_piece=Bishop).pgn]},
+                {"text": "Ладья", "data": ["MOVE", move.copy(new_piece=Rook).pgn]},
             ]
             new_text = self.init_msg_text.split("\n")
             new_text[
@@ -975,34 +1272,29 @@ class GroupMatch(BaseMatch):
 
             self.msg = self.msg.edit_media(
                 media=InputMediaPhoto(
-                    self.visualise_board(
-                        selected=args[1], pointers=[{"pos": args[2], "type": "special"}]
-                    ),
+                    self.visualise_board(selected=args[1], possible_moves=[move]),
                     caption="\n".join(new_text),
                     filename=self.image_filename,
                 ),
-                reply_markup=self._keyboard(figures, player.id),
+                reply_markup=self._keyboard(pieces, player.id),
             )
 
-        elif args[0] == "PROMOTION":
-            self.init_turn(move=args[1:3], promotion=args[3])
-
         elif args[0] == "MOVE":
-            self.init_turn(move=args[1:3])
+            self.init_turn(move=Move.from_pgn(args[1], self.board))
 
 
 class PMMatch(BaseMatch):
-    def __init__(self, player1, player2, chat1, chat2, **kwargs):
-        self.player1 = player1
-        self.player2 = player2
-        self.chat_id1 = chat1
-        self.chat_id2 = chat2
-        self.msg1 = None
-        self.msg2 = None
+    def __init__(self, player1: User, player2: User, chat1: int, chat2: int, **kwargs):
+        self.player1: User = player1
+        self.player2: User = player2
+        self.chat_id1: int = chat1
+        self.chat_id2: int = chat2
+        self.msg1: Message = None
+        self.msg2: Message = None
         super().__init__(**kwargs)
 
     @classmethod
-    def from_dict(cls, obj, match_id, bot):
+    def from_dict(cls, obj: JSON, match_id: int, bot=Bot) -> "PMMatch":
         logging.debug(f"Constructing {cls.__name__} object:", obj)
         player1 = User.de_json(obj["player1"] | {"is_bot": False}, bot)
         player2 = User.de_json(obj["player2"] | {"is_bot": False}, bot)
@@ -1012,10 +1304,9 @@ class PMMatch(BaseMatch):
             obj["chat_id1"],
             obj["chat_id2"],
             bot=bot,
-            fen=obj["states"][-1],
             id=match_id,
         )
-        new.states = obj["states"]
+        new.states = [BoardInfo.from_fen(fen) for fen in obj["states"]]
         new.init_msg_text = obj["msg_text"]
         new.msg1 = Message(
             obj["msg_id1"],
@@ -1037,44 +1328,44 @@ class PMMatch(BaseMatch):
         return new
 
     @property
-    def player_msg(self):
-        return self.msg1 if self.is_white_turn else self.msg2
+    def player_msg(self) -> Message:
+        return self.msg1 if self.board.is_white_turn else self.msg2
 
     @player_msg.setter
-    def player_msg(self, msg):
-        if self.is_white_turn:
+    def player_msg(self, msg: Message) -> None:
+        if self.board.is_white_turn:
             self.msg1 = msg
         else:
             self.msg2 = msg
 
     @property
-    def opponent_msg(self):
-        return self.msg2 if self.is_white_turn else self.msg1
+    def opponent_msg(self) -> Message:
+        return self.msg2 if self.board.is_white_turn else self.msg1
 
     @opponent_msg.setter
-    def opponent_msg(self, msg):
-        if self.is_white_turn:
+    def opponent_msg(self, msg: Message) -> None:
+        if self.board.is_white_turn:
             self.msg2 = msg
         else:
             self.msg1 = msg
 
     @property
-    def players(self):
+    def players(self) -> tuple[User, User]:
         return (
             (self.player1, self.player2)
-            if self.is_white_turn
+            if self.board.is_white_turn
             else (self.player2, self.player1)
         )
 
     @property
-    def chat_ids(self):
+    def chat_ids(self) -> tuple[int, int]:
         return (
             (self.chat_id1, self.chat_id2)
-            if self.is_white_turn
+            if self.board.is_white_turn
             else (self.chat_id2, self.chat_id1)
         )
 
-    def to_dict(self):
+    def to_dict(self) -> JSON:
         res = super().to_dict()
         res.update(
             {
@@ -1082,7 +1373,7 @@ class PMMatch(BaseMatch):
                 "chat_id1": self.chat_id1,
                 "chat_id2": self.chat_id2,
                 "msg_id1": self.msg1.message_id,
-                "msg_id2": getattr(self.msg2, 'message_id', None),
+                "msg_id2": getattr(self.msg2, "message_id", None),
                 "msg_text": self.init_msg_text,
                 "player1": {
                     k: v
@@ -1098,38 +1389,57 @@ class PMMatch(BaseMatch):
         )
         return res
 
-    def init_turn(self, move=[None, None], turn_info=None, promotion=""):
-        res = (
-            turn_info
-            if turn_info
-            else super().init_turn(move=move, promotion=promotion)
-        )
+    def init_turn(self, move: Move = None, call_parent_method: bool = True):
+        if call_parent_method:
+            super().init_turn(move=move)
         player, opponent = self.players
         player_chatid, opponent_chatid = self.chat_ids
-        if res["player_gamestate"] == "checkmate":
-            player_text = (
-                opponent_text
-            ) = f"Игра окончена: шах и мат!\nХодов: {self.turn - 1}.\nПобедитель: {self.db.get_name(opponent)}."
-        elif res["player_gamestate"] == "stalemate":
-            player_text = (
-                opponent_text
-            ) = f"Игра окончена: за последние 50 ходов не было убито ни одной фигуры и не сдвинуто ни одной пешки - ничья!\nХодов: {self.turn - 1}"
+        state = self.get_state()
+        self.finished = state != "normal"
+
+        if state == "checkmate":
+            player_text = opponent_text = f"""
+Игра окончена: шах и мат!
+Победитель: {self.db.get_name(opponent)}
+Ходов: {self.board.turn - 1}.
+            """
+        elif state == "50-move-draw":
+            player_text = opponent_text = f"""
+Игра окончена: за последние 50 ходов не было убито ни одной фигуры и не сдвинуто ни одной пешки.
+Ничья!
+Ходов: {self.board.turn - 1}
+            """
+        elif state == "3fold-repetition-draw":
+            player_text = opponent_text = f"""
+Игра окончена: одинаковая позиция доски возникла 3-ий раз подряд.
+Ничья!
+Ходов: {self.board.turn - 1}
+            """
+        elif state == "stalemate-draw":
+            player_text = opponent_text = f"""
+Игра окончена: у {"белых" if self.board.is_white_turn else "черных"} не осталось ходов, но их король не под шахом.
+Ничья!
+Ходов: {self.board.turn - 1}
+            """
         else:
-            player_text = f"Ход {self.turn}"
-            if res["figure"]:
-                player_text += f"\n{res['figure'].name}{' -> '+eval(FENSYMBOLS[res['promotion']]).name if res['promotion'] else ''}: {res['from']} -> {res['to']}"
-                if res["castling"]:
-                    player_text += f' ({"Короткая" if res["castling"] == "kingside" else "Длинная"} рокировка)'
+            player_text = f"Ход {self.board.turn}"
+            if move:
+                player_text += f"\n{move.piece.name}{' -> '+move.new_piece.name if move.is_promotion else ''}"
+                player_text += f": {encode_pos(move.src)} -> {encode_pos(move.dst)}"
+                if move.is_castling:
+                    player_text += f' ({"Короткая" if  move.rook_src.column == 7 else "Длинная"} рокировка)'
+                if move.is_killing:
+                    player_text += f"\n{move.killed.name} на {encode_pos(move.dst)} игрока {self.db.get_name(player)} убит"
+                    player_text += (
+                        f"{'а' if move.killed.name in ['Пешка', 'Ладья'] else ''}!"
+                    )
+                else:
+                    player_text += "\n"
             else:
-                player_text += "\n"
+                player_text += "\n\n"
 
-            if res["killed"]:
-                player_text += f"\n{res['killed']} игрока {self.db.get_name(player)} убит{'а' if res['killed'].name in ['Пешка', 'Ладья'] else ''}!"
-            else:
-                player_text += "\n"
-
-            if res["player_gamestate"] == "check":
-                player_text += f"\nИгроку {player.name} поставлен шах!"
+            if state == "check":
+                player_text += f"\nИгроку {self.db.get_name(player)} поставлен шах!"
             else:
                 player_text += "\n"
 
@@ -1191,9 +1501,9 @@ class PMMatch(BaseMatch):
                     )
 
     def handle_input(self, args):
-        args = self.decode_input(args)
         player, opponent = self.players
-        allies, enemies = self.figures
+        allies, _ = self.pieces
+
         if args[0] == "INIT_MSG":
             self.player_msg = self.player_msg.edit_media(
                 media=InputMediaPhoto(
@@ -1211,14 +1521,14 @@ class PMMatch(BaseMatch):
             )
 
         if args[0] == "TURN":
-            figure_buttons = [{"text": "Назад", "data": ["INIT_MSG"]}]
-            for figure in allies:
+            piece_buttons = [{"text": "Назад", "data": ["INIT_MSG"]}]
+            for piece in allies:
                 if next(
-                    filter(figure.is_legal, [i["pos"] for i in figure.get_moves()]),
+                    filter(self.board.is_legal, piece.get_moves()),
                     None,
                 ):
-                    figure_buttons.append(
-                        {"text": str(figure), "data": ["CHOOSE_FIGURE", figure.pos]}
+                    piece_buttons.append(
+                        {"text": str(piece), "data": ["CHOOSE_PIECE", piece.pos]}
                     )
 
             new_text = self.init_msg_text.split("\n")
@@ -1230,9 +1540,7 @@ class PMMatch(BaseMatch):
                     caption="\n".join(new_text),
                     filename=self.image_filename,
                 ),
-                reply_markup=self._keyboard(
-                    figure_buttons, player.id, head_button=True
-                ),
+                reply_markup=self._keyboard(piece_buttons, player.id, head_item=True),
             )
 
         elif args[0] == "SURRENDER":
@@ -1245,33 +1553,32 @@ class PMMatch(BaseMatch):
                             video,
                             caption=f"""
 Игра окончена: {self.db.get_name(player)} сдался.
-Ходов: {self.turn - 1}.
-Победитель: {self.db.get_name(opponent)}.""",
+Победитель: {self.db.get_name(opponent)}.
+Ходов: {self.board.turn - 1}.
+                            """,
                             filename=self.video_filename,
                             thumb=thumb,
                         )
                     )
 
-        elif args[0] == "CHOOSE_FIGURE":
+        elif args[0] == "CHOOSE_PIECE":
+            args[1] = decode_pos(args[1])
             dest_buttons = [{"text": "Назад", "data": ["TURN"]}]
-            figure = self[args[1]]
-            moves = list(
-                filter(lambda move: figure.is_legal(move["pos"]), figure.get_moves())
-            )
+            piece = self.board[args[1]]
+            moves = list(filter(self.board.is_legal, piece.get_moves()))
             for move in moves:
-                if move["type"] == "special":
+                if move.is_promotion:
                     dest_buttons.append(
                         {
-                            "text": "⏫" + encode_pos(move["pos"]),
-                            "data": ["PROMOTION_MENU", args[1], move["pos"]],
+                            "text": MOVETYPE_MARKERS[move.type] + encode_pos(move.dst),
+                            "data": ["PROMOTION_MENU", args[1], move.dst],
                         }
                     )
                 else:
                     dest_buttons.append(
                         {
-                            "text": ("❌" if move["type"] == "killing" else "")
-                            + encode_pos(move["pos"]),
-                            "data": ["MOVE", args[1], move["pos"]],
+                            "text": MOVETYPE_MARKERS[move.type] + encode_pos(move.dst),
+                            "data": ["MOVE", move.pgn],
                         }
                     )
 
@@ -1280,19 +1587,28 @@ class PMMatch(BaseMatch):
 
             self.player_msg = self.player_msg.edit_media(
                 media=InputMediaPhoto(
-                    self.visualise_board(selected=args[1], pointers=moves),
+                    self.visualise_board(selected=args[1], possible_moves=moves),
                     caption="\n".join(new_text),
                     filename=self.image_filename,
                 ),
-                reply_markup=self._keyboard(dest_buttons, player.id, head_button=True),
+                reply_markup=self._keyboard(dest_buttons, player.id, head_item=True),
             )
 
         elif args[0] == "PROMOTION_MENU":
-            figures = [
-                {"text": "Ферзь", "data": ["PROMOTION", args[1], args[2], "q"]},
-                {"text": "Конь", "data": ["PROMOTION", args[1], args[2], "n"]},
-                {"text": "Слон", "data": ["PROMOTION", args[1], args[2], "b"]},
-                {"text": "Ладья", "data": ["PROMOTION", args[1], args[2], "r"]},
+            args[1] = decode_pos(args[1])
+            args[2] = decode_pos(args[2])
+            move = self.board[args[1]].create_move(args[2], new_piece=Queen)
+            pieces = [
+                {"text": "Ферзь", "data": ["PROMOTION", move.pgn]},
+                {
+                    "text": "Конь",
+                    "data": ["PROMOTION", move.copy(new_piece=Knight).pgn],
+                },
+                {
+                    "text": "Слон",
+                    "data": ["PROMOTION", move.copy(new_piece=Bishop).pgn],
+                },
+                {"text": "Ладья", "data": ["PROMOTION", move.copy(new_piece=Rook).pgn]},
             ]
 
             new_text = self.init_msg_text.split("\n")
@@ -1300,26 +1616,21 @@ class PMMatch(BaseMatch):
 
             self.player_msg = self.player_msg.edit_media(
                 media=InputMediaPhoto(
-                    self.visualise_board(
-                        selected=args[1], pointers=[{"pos": args[2], "type": "special"}]
-                    ),
+                    self.visualise_board(selected=args[1], possible_moves=[move]),
                     caption="\n".join(new_text),
                     filename=self.image_filename,
                 ),
-                reply_markup=self._keyboard(figures, player.id),
+                reply_markup=self._keyboard(pieces, player.id),
             )
 
-        elif args[0] == "PROMOTION":
-            return self.init_turn(move=args[1:3], promotion=args[3])
-
         elif args[0] == "MOVE":
-            return self.init_turn(move=args[1:3])
+            return self.init_turn(move=Move.from_pgn(args[1], self.board))
 
 
 class AIMatch(PMMatch):
-    def __init__(self, player, chat_id, player2=None, **kwargs):
+    def __init__(self, player: User, chat_id: int, player2: User = None, **kwargs):
         ai_player = player2 if player2 else kwargs["bot"].get_me()
-        self.ai_rating = None
+        self.ai_rating: int = None
         super().__init__(player, ai_player, chat_id, 0, **kwargs)
         self.engine_api = subprocess.Popen(
             os.environ["ENGINE_FILENAME"],
@@ -1334,11 +1645,11 @@ class AIMatch(PMMatch):
         self.engine_api.stdin.write("setoption name UCI_LimitStrength value true\n")
 
     @classmethod
-    def from_dict(cls, obj, match_id, bot):
+    def from_dict(cls, obj: JSON, match_id: int, bot=Bot) -> "AIMatch":
         logging.debug(f"Constructing {cls.__name__} object: {obj}")
         player = User.de_json(obj["player1"] | {"is_bot": False}, bot)
-        new = cls(player, obj["chat_id1"], bot=bot, fen=obj["states"][-1], id=match_id)
-        new.states = obj["states"]
+        new = cls(player, obj["chat_id1"], bot=bot, id=match_id)
+        new.states = [BoardInfo.from_fen(fen) for fen in obj["states"]]
         new.init_msg_text = obj["msg_text"]
         new.set_elo(obj["ai_rating"])
         new.msg1 = Message(
@@ -1348,14 +1659,10 @@ class AIMatch(PMMatch):
             bot=bot,
             caption=obj["msg_text"],
         )
-        if obj["ai_rating"]:
-            new.turn += 1
-            new.empty_halfturns += 1
-            new.is_white_turn = not new.is_white_turn
 
         return new
 
-    def to_dict(self):
+    def to_dict(self) -> JSON:
         res = super().to_dict()
         del res["player2"]
         del res["msg_id2"]
@@ -1363,15 +1670,15 @@ class AIMatch(PMMatch):
         res.update({"ai_rating": self.ai_rating, "type": "AI"})
         return res
 
-    def set_elo(self, value):
+    def set_elo(self, value: int) -> None:
         self.ai_rating = value
         self.engine_api.stdin.write(f"setoption name UCI_Elo value {value}\n")
 
-    def init_turn(self, setup=False, **kwargs):
+    def init_turn(self, setup: bool = False, **kwargs) -> None:
         if setup:
             self.msg1 = self.bot.send_photo(
                 self.chat_id1,
-                self.visualise_board(fen=STARTPOS),
+                self.visualise_board(),
                 caption="Выберите уровень сложности:",
                 filename=self.image_filename,
                 reply_markup=self._keyboard(
@@ -1388,17 +1695,19 @@ class AIMatch(PMMatch):
         else:
             turn_info = BaseMatch.init_turn(self, **kwargs)
             if self.finished:
-                return super().init_turn(turn_info=turn_info)
+                return super().init_turn(self, call_parent_method=False, **kwargs)
 
-            self.engine_api.stdin.write(f"position fen {self.states[-1]}\n")
+            self.engine_api.stdin.write(f"position fen {self.board.fen}\n")
             self.engine_api.stdin.write(f"go depth 2\n")
             for line in self.engine_api.stdout:
                 if "bestmove" in line:
                     turn = line.split(" ")[1].strip("\n")
                     break
             return super().init_turn(
-                move=[decode_pos(turn[:2]), decode_pos(turn[2:4])],
-                promotion=turn[-1] if len(turn) == 5 else "",
+                move=self.board[decode_pos(turn[:2])].create_move(
+                    decode_pos(turn[2:4]),
+                    new_piece=eval(FENSYMBOLS[turn[-1]]) if len(turn) == 5 else None
+                ),
             )
 
     def handle_input(self, args):

@@ -3,6 +3,7 @@ from telegram.ext import DictPersistence, CallbackContext
 import logging
 import sys
 import json
+import gzip
 
 
 class RedisInterface(redis.Redis):
@@ -127,8 +128,21 @@ class RedisContext(CallbackContext):
 
 if __name__ == '__main__':
     env = json.load(open('debug_env.json'))
-    
+    conn = redis.Redis.from_url(env['REDISCLOUD_URL'])
+
     if sys.argv[1] == 'clear':
-        conn = redis.Redis.from_url(env['REDISCLOUD_URL'])
         for key in conn.scan_iter():
             del conn[key]
+
+    elif sys.argv[1] == 'peek':
+        res = {}
+        for key in conn.scan_iter():
+            key = key.decode()
+            if conn.type(key) == b'string':
+                res[key] = gzip.decompress(conn.get(key)).decode()
+                if key.startswith('ptb'):
+                    res[key] = json.loads(res[key]) if res[key] else res[key]
+            elif conn.type(key) == b'set':
+                res[key] = [i.decode() for i in conn.sscan_iter(key)]
+
+        print(json.dumps(res, indent=2))
