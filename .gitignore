@@ -5,3 +5,5 @@ __pycache__/
 stockfish
 .DS_Store
 .vscode
+chess/__pycache__
+images/temp/*

@@ -1,16 +1,18 @@
 import os
-import os.path
 import json
 import telegram as tg
 import chess
-import bot_utils
+import db_utils
 import difflib
 import gzip
 import logging
 
-logging.basicConfig(format="%(relativeCreated)s %(module)s %(message)s", level=logging.DEBUG)
+logging.basicConfig(
+    format="%(relativeCreated)s %(module)s %(message)s", level=logging.DEBUG
+)
 
 if os.path.exists("debug_env.json"):
+    chess.AIMatch.engine_filename = "./stockfish"
     with open("debug_env.json") as r:
         os.environ.update(json.load(r))
 
@@ -79,14 +81,14 @@ commands = [
 updater = tg.ext.Updater(
     token=os.environ["BOT_TOKEN"],
     defaults=tg.ext.Defaults(quote=True),
-    persistence=bot_utils.RedisPersistence(
+    persistence=db_utils.RedisPersistence(
         url=os.environ["REDISCLOUD_URL"],
         store_user_data=False,
         store_chat_data=False,
         encoder=encode_data,
         decoder=decode_data,
     ),
-    context_types=tg.ext.ContextTypes(context=bot_utils.RedisContext),
+    context_types=tg.ext.ContextTypes(context=db_utils.RedisContext),
     user_sig_handler=stop_bot,
 )
 if not updater.dispatcher.bot_data:
