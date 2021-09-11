@@ -1,6 +1,6 @@
+import gzip
 import itertools
 import random
-import subprocess
 from telegram import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -12,9 +12,10 @@ from telegram import (
     Bot,
 )
 import logging
-import time
-from .base import *
-from . import pieces, board, media
+import datetime
+import threading
+from .utils import *
+from . import core, media, analysis
 from typing import Any, Union, Optional
 
 IDSAMPLE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-+"
@@ -37,34 +38,48 @@ def _group_items(obj: list[Any], n: int, head_item: bool = False) -> list[list[A
     return res
 
 
+def decode_pgn_moveseq(
+    src: str, startpos: core.BoardInfo = core.BoardInfo.from_fen(STARTPOS)
+) -> list[core.BoardInfo]:
+    states = [startpos]
+    *moves, result = src.replace("\n", " ").split()
+    for token in moves:
+        if not (token[:-1].isdigit() and token[-1] == "."):
+            states.append(states[-1] + core.Move.from_pgn(token, states[-1]))
+
+    return states, result
+
+
 def from_dict(obj: dict[str, Any], match_id: str, bot: Bot) -> "BaseMatch":
     cls = eval(obj["type"] + "Match")
     return cls.from_dict(obj, match_id, bot)
 
 
-def decode_pgn_seq(pgn: str) -> list[board.BoardInfo]:
+def decode_pgn_seq(pgn: str) -> list[core.BoardInfo]:
     pass
 
 
 class BaseMatch:
+    ENGINE_FILENAME = "./stockfish_14_x64"
     WRONG_PERSON_MSG = "Сейчас не ваш ход!"
     db = None
 
     def __init__(self, bot=None, id=None):
         self.init_msg_text: Optional[str] = None
-        self.last_move: Optional[board.Move] = None
+        self.last_move: Optional[core.Move] = None
         self.bot: Bot = bot
-        self.states: list[board.BoardInfo] = [board.BoardInfo.from_fen(STARTPOS)]
-        self.finished: bool = False
+        self.states: list[core.BoardInfo] = [core.BoardInfo.from_fen(STARTPOS)]
+        self.result = "*"
         self.id: str = id if id else "".join(random.choices(IDSAMPLE, k=8))
         self.image_filename: str = f"chess-{self.id}.jpg"
         self.video_filename: str = f"chess-{self.id}.mp4"
-        self.game_filename: str = f"telegram-chess-bot-{self.id}.pgn"
+        self.game_filename: str = f"telegram-chess-bot-{self.id}.pgn_encode()"
 
     def _keyboard(
         self,
         seq: list[dict[str, Union[str, BoardPoint]]],
         expected_uid: int,
+        handler_id: str = None,
         head_item: bool = False,
     ) -> Optional[InlineKeyboardMarkup]:
         res = []
@@ -80,7 +95,7 @@ class BaseMatch:
             res.append(
                 InlineKeyboardButton(
                     text=button["text"],
-                    callback_data=f"{expected_uid if expected_uid else ''}\n{self.id}\n{'#'.join(data)}",
+                    callback_data=f"{expected_uid if expected_uid else ''}\n{handler_id or self.id}\n{'#'.join(data)}",
                 )
             )
 
@@ -89,18 +104,11 @@ class BaseMatch:
         else:
             return None
 
-    def get_moves(self) -> list[board.Move]:
-        res = [None]
-        for index in range(1, len(self.states)):
-            res.append(self.states[index] - self.states[index - 1])
-
-        return res
-
     def to_dict(self) -> JSON:
-        return {"type": "Base", "states": [board.fen for board in self.states]}
+        return {"type": "Base", "moves": core.get_pgn_moveseq(core.get_moves(self.states))}
 
     @property
-    def pieces(self) -> tuple[list[pieces.BasePiece], list[pieces.BasePiece]]:
+    def pieces(self) -> tuple[tuple[core.BasePiece]]:
         return (
             (self.states[-1].whites, self.states[-1].blacks)
             if self.states[-1].is_white_turn
@@ -108,7 +116,7 @@ class BaseMatch:
         )
 
     def get_state(self) -> Optional[str]:
-        cur_king = self.states[-1][pieces.King, self.states[-1].is_white_turn][0]
+        cur_king = self.states[-1]["k", self.states[-1].is_white_turn][0]
         if cur_king.in_checkmate():
             return "checkmate"
         if cur_king.in_check():
@@ -130,9 +138,41 @@ class BaseMatch:
         if next(itertools.chain(*cur_side_moves), None) is None:
             return "stalemate-draw"
 
+        pawns, knights, bishops, rooks, queens = [
+            self.states[-1][cls] for cls in ["p", "n", "b", "r", "q"]
+        ]
+        if not rooks and not queens and not pawns:
+            if any(
+                [
+                    len(bishops) == 1 and not knights,
+                    len(knights) == 1 and not bishops,
+                    len(bishops) == 2
+                    and is_lightsquare(bishops[0].pos) == is_lightsquare(bishops[1].pos)
+                    and not knights,
+                ]
+            ):
+                return "insufficient-material-draw"
+
         return "normal"
 
-    def init_turn(self, move: board.Move = None) -> None:
+    def pgn_encode(self, headers: dict = {}):
+        std_headers = {
+            "Event": "Online Chess on Telegram", 
+            "Site": "https://t.me/real_chessbot", 
+            "Date": datetime.datetime.now().strftime("%Y.%m.%d"),
+            "Round": 1,
+            "White": self.db.get_name(self.player1) if self.db and hasattr(self, "player1") else "?",
+            "Black": self.db.get_name(self.player2) if self.db and hasattr(self, "player2") else "?",
+            "Result": self.result
+        }
+        headers = std_headers | headers
+
+        encoded = "\n".join([f'[{k} "{v}"]' for k, v in headers.items()])
+        return encoded + "\n\n" + core.get_pgn_moveseq(core.get_moves(self.states), result=self.result)
+
+    #def send_finish_msg(self, msg: Message, text: str):
+
+    def init_turn(self, move: core.Move = None) -> None:
         if move:
             self.states.append(self.states[-1] + move)
         self.last_move = move
@@ -158,11 +198,11 @@ class GroupMatch(BaseMatch):
             bot=bot,
             id=match_id,
         )
-        new.states = [board.BoardInfo.from_fen(fen) for fen in obj["states"]]
+        new.states = decode_pgn_moveseq(obj["moves"])
         new.init_msg_text = obj["msg_text"]
         new.msg = Message(
             obj["msg_id"],
-            time.monotonic,
+            datetime.datetime.now().timestamp(),
             Chat(obj["chat_id"], "group", bot=bot),
             bot=bot,
             caption=obj["msg_text"],
@@ -203,11 +243,14 @@ class GroupMatch(BaseMatch):
         )
         return res
 
-    def init_turn(self, move: board.Move = None) -> None:
+    def init_turn(self, move: core.Move = None) -> None:
         super().init_turn(move=move)
         player, opponent = self.players
         state = self.get_state()
-        self.finished = state != "normal"
+        if "draw" in state:
+            self.result = "1/2-1/2"
+        elif state == "checkmate":
+            self.result = "0-1" if self.states[-1].is_white_turn else "1-0"
 
         if state == "checkmate":
             msg = f"""
@@ -233,6 +276,12 @@ class GroupMatch(BaseMatch):
 Ничья!
 Ходов: {self.states[-1].turn - 1}
             """
+        elif state == "insufficient-material-draw":
+            msg = f"""
+Игра окончена: у обеих сторон недостаточно фигур, чтобы поставить мат.
+Ничья!
+Ходов: {self.states[-1].turn - 1}
+            """
         else:
             msg = f"Ход {self.states[-1].turn}"
             if move:
@@ -240,7 +289,7 @@ class GroupMatch(BaseMatch):
                 msg += f": {encode_pos(move.src)} -> {encode_pos(move.dst)}"
                 if move.is_castling:
                     msg += f" ({'Короткая' if move.rook_src.column == 7 else 'Длинная'} рокировка)"
-                if move.is_killing:
+                if move.is_capturing:
                     msg += f"\n{move.killed.name} на {encode_pos(move.dst)} убит"
                     msg += f"{'а' if move.killed.name in ['Пешка', 'Ладья'] else ''}!"
                 else:
@@ -255,7 +304,7 @@ class GroupMatch(BaseMatch):
 
             msg += f"\nХодит { self.db.get_name(player) }; выберите действие:"
 
-        if self.finished:
+        if self.result != "*":
             video, thumb = media.board_video(self)
             self.msg.edit_media(
                 media=InputMediaVideo(
@@ -274,7 +323,11 @@ class GroupMatch(BaseMatch):
                 player.id,
             )
             self.init_msg_text = msg
-            img = media.board_image(self.states[-1], prev_move=self.last_move)
+            img = media.board_image(
+                self.states,
+                player1_name=self.db.get_name(self.player1),
+                player2_name=self.db.get_name(self.player2),
+            )
             if self.msg:
                 self.msg = self.msg.edit_media(
                     media=InputMediaPhoto(
@@ -292,7 +345,7 @@ class GroupMatch(BaseMatch):
                     filename=self.image_filename,
                     reply_markup=keyboard,
                 )
-                
+
     def handle_input(self, args: list[Union[str, int]]) -> None:
         player, opponent = self.players
         allies, _ = self.pieces
@@ -311,7 +364,7 @@ class GroupMatch(BaseMatch):
         if args[0] == "TURN":
             piece_buttons = [{"text": "Назад", "data": ["INIT_MSG"]}]
             for piece in allies:
-                if next(filter(self.states[-1].is_legal, piece.get_moves()), None):
+                if next(filter(lambda x: x.is_legal(), piece.get_moves()), None):
                     piece_buttons.append(
                         {"text": str(piece), "data": ["CHOOSE_PIECE", piece.pos]}
                     )
@@ -321,7 +374,11 @@ class GroupMatch(BaseMatch):
 
             self.msg = self.msg.edit_media(
                 media=InputMediaPhoto(
-                    media.board_image(self.states[-1], prev_move=self.last_move),
+                    media.board_image(
+                        self.states,
+                        player1_name=self.db.get_name(self.player1),
+                        player2_name=self.db.get_name(self.player2),
+                    ),
                     caption="\n".join(new_text),
                     filename=self.image_filename,
                 ),
@@ -329,7 +386,7 @@ class GroupMatch(BaseMatch):
             )
 
         elif args[0] == "SURRENDER":
-            self.finished = True
+            self.result = "0-1" if self.states[-1].is_white_turn else "1-0"
             video, thumb = media.board_video(self)
             self.msg = self.msg.edit_media(
                 media=InputMediaVideo(
@@ -353,7 +410,7 @@ class GroupMatch(BaseMatch):
                 if move.is_promotion:
                     dest_buttons.append(
                         {
-                            "text": "⏫" + encode_pos(move.dst),
+                            "text": MOVETYPE_MARKERS[move.type] + encode_pos(move.dst),
                             "data": ["PROMOTION_MENU", args[1], move.dst],
                         }
                     )
@@ -361,7 +418,7 @@ class GroupMatch(BaseMatch):
                     dest_buttons.append(
                         {
                             "text": MOVETYPE_MARKERS[move.type] + encode_pos(move.dst),
-                            "data": ["MOVE", move.pgn],
+                            "data": ["MOVE", move.pgn_encode()],
                         }
                     )
             new_text = self.init_msg_text.split("\n")
@@ -372,10 +429,11 @@ class GroupMatch(BaseMatch):
             self.msg = self.msg.edit_media(
                 media=InputMediaPhoto(
                     media.board_image(
-                        self.states[-1],
-                        prev_move=self.last_move,
+                        self.states,
                         selected=args[1],
                         possible_moves=moves,
+                        player1_name=self.db.get_name(self.player1),
+                        player2_name=self.db.get_name(self.player2),
                     ),
                     caption="\n".join(new_text),
                     filename=self.image_filename,
@@ -384,12 +442,21 @@ class GroupMatch(BaseMatch):
             )
 
         elif args[0] == "PROMOTION_MENU":
-            move = self.states[-1][args[1]].create_move(args[2], new_piece=pieces.Queen)
+            move = core.Move.from_piece(self.states[-1][args[1]], args[2], new_piece="q")
             pieces = [
-                {"text": "Ферзь", "data": ["MOVE", move.pgn]},
-                {"text": "Конь", "data": ["MOVE", move.copy(new_piece=pieces.Knight).pgn]},
-                {"text": "Слон", "data": ["MOVE", move.copy(new_piece=pieces.Bishop).pgn]},
-                {"text": "Ладья", "data": ["MOVE", move.copy(new_piece=pieces.Rook).pgn]},
+                {"text": "Ферзь", "data": ["MOVE", move.pgn_encode()]},
+                {
+                    "text": "Конь",
+                    "data": ["MOVE", move.copy(new_piece="n").pgn_encode()],
+                },
+                {
+                    "text": "Слон",
+                    "data": ["MOVE", move.copy(new_piece="b").pgn_encode()],
+                },
+                {
+                    "text": "Ладья",
+                    "data": ["MOVE", move.copy(new_piece="r").pgn_encode()],
+                },
             ]
             new_text = self.init_msg_text.split("\n")
             new_text[
@@ -399,10 +466,11 @@ class GroupMatch(BaseMatch):
             self.msg = self.msg.edit_media(
                 media=InputMediaPhoto(
                     media.board_image(
-                        self.states[-1],
-                        prev_move=self.last_move,
+                        self.states,
                         selected=args[1],
                         possible_moves=[move],
+                        player1_name=self.db.get_name(self.player1),
+                        player2_name=self.db.get_name(self.player2),
                     ),
                     caption="\n".join(new_text),
                     filename=self.image_filename,
@@ -411,7 +479,7 @@ class GroupMatch(BaseMatch):
             )
 
         elif args[0] == "MOVE":
-            self.init_turn(move=board.Move.from_pgn(args[1], self.states[-1]))
+            self.init_turn(move=core.Move.from_pgn(args[1], self.states[-1]))
 
 
 class PMMatch(BaseMatch):
@@ -437,18 +505,18 @@ class PMMatch(BaseMatch):
             bot=bot,
             id=match_id,
         )
-        new.states = [board.BoardInfo.from_fen(fen) for fen in obj["states"]]
+        new.states, new.result = decode_pgn_moveseq(obj["moves"])
         new.init_msg_text = obj["msg_text"]
         new.msg1 = Message(
             obj["msg_id1"],
-            time.monotonic,
+            datetime.datetime.now().timestamp(),
             Chat(obj["chat_id1"], "private", bot=bot),
             bot=bot,
             caption=obj["msg_text"],
         )
         new.msg2 = Message(
             obj["msg_id2"],
-            time.monotonic,
+            datetime.datetime.now().timestamp(),
             Chat(obj["chat_id2"], "private", bot=bot),
             bot=bot,
         )
@@ -520,13 +588,42 @@ class PMMatch(BaseMatch):
         )
         return res
 
-    def init_turn(self, move: board.Move = None, call_parent_method: bool = True):
+    def _send_analysis_video(self, text: str):
+        analyser = analysis.ChessEngine(BaseMatch.ENGINE_FILENAME)
+        video, thumb = media.board_video(self, analyser=analyser)
+        new_msg = InputMediaVideo(
+            video, caption=text, filename=self.video_filename, thumb=thumb
+        )
+        self.db.set(f"{self.id}:pgn", gzip.compress(self.pgn_encode().encode()), ex=3600*48)
+
+        self.player_msg = self.player_msg.edit_media(
+            media=new_msg,
+            reply_markup=self._keyboard(
+                [{"text": "Скачать партию", "data": ["DOWNLOAD", self.id]}],
+                expected_uid=self.players[0].id,
+                handler_id="MAIN"
+            )
+        )
+        if self.opponent_msg:
+            self.opponent_msg = self.opponent_msg.edit_media(
+                media=new_msg,
+                reply_markup=self._keyboard(
+                    [{"text": "Скачать партию", "data": ["DOWNLOAD", self.id]}],
+                    expected_uid=self.players[1].id,
+                    handler_id="MAIN"
+                )
+            )
+
+    def init_turn(self, move: core.Move = None, call_parent_method: bool = True):
         if call_parent_method:
             super().init_turn(move=move)
         player, opponent = self.players
         player_chatid, opponent_chatid = self.chat_ids
         state = self.get_state()
-        self.finished = state != "normal"
+        if "draw" in state:
+            self.result = "1/2-1/2"
+        elif state == "checkmate":
+            self.result = "0-1" if self.states[-1].is_white_turn else "1-0"
 
         if state == "checkmate":
             player_text = opponent_text = f"""
@@ -559,7 +656,7 @@ class PMMatch(BaseMatch):
                 player_text += f": {encode_pos(move.src)} -> {encode_pos(move.dst)}"
                 if move.is_castling:
                     player_text += f' ({"Короткая" if  move.rook_src.column == 7 else "Длинная"} рокировка)'
-                if move.is_killing:
+                if move.is_capturing:
                     player_text += f"\n{move.killed.name} на {encode_pos(move.dst)} игрока {self.db.get_name(player)} убит"
                     player_text += (
                         f"{'а' if move.killed.name in ['Пешка', 'Ладья'] else ''}!"
@@ -579,14 +676,20 @@ class PMMatch(BaseMatch):
             player_text += "\nВыберите действие:"
             opponent_text += f"\nХодит {self.db.get_name(player)}"
 
-        if self.finished:
-            video, thumb = media.board_video(self)
-            new_msg = InputMediaVideo(
-                video, caption=player_text, filename=self.video_filename, thumb=thumb
+        if self.result != "*":
+            eval_thread = threading.Thread(target=self._send_analysis_video, args=(player_text,))
+            eval_thread.start()
+            last_boardimg = InputMediaPhoto(media.board_image(
+                    self.states,
+                    player1_name=self.db.get_name(self.player1),
+                    player2_name=self.db.get_name(self.player2),
+                ),
+                caption="Игра окончена, проводится анализ партии, пожалуйста подождите...",
+                filename=self.image_filename,
             )
-            self.player_msg = self.player_msg.edit_media(media=new_msg)
+            self.player_msg = self.player_msg.edit_media(last_boardimg)
             if self.opponent_msg:
-                self.opponent_msg = self.opponent_msg.edit_media(media=new_msg)
+                self.player_msg = self.player_msg.edit_media(last_boardimg)
         else:
             self.init_msg_text = player_text
             keyboard = self._keyboard(
@@ -599,26 +702,42 @@ class PMMatch(BaseMatch):
             if self.player_msg:
                 self.player_msg = self.player_msg.edit_media(
                     media=InputMediaPhoto(
-                        media.board_image(self.states[-1], prev_move=self.last_move),
+                        media.board_image(
+                            self.states,
+                            player1_name=self.db.get_name(self.player1),
+                            player2_name=self.db.get_name(self.player2),
+                        ),
                         caption=player_text,
                         filename=self.image_filename,
                     ),
                     reply_markup=keyboard,
                 )
-            else:
-                self.player_msg = self.bot.send_photo(
-                    player_chatid,
-                    media.board_image(self.states[-1], prev_move=self.last_move),
-                    caption=player_text,
-                    filename=self.image_filename,
-                    reply_markup=keyboard,
+            elif player_chatid:
+                self.player_msg = (
+                    self.bot.send_photo(
+                        player_chatid,
+                        media.board_image(
+                            self.states,
+                            player1_name=self.db.get_name(self.player1),
+                            player2_name=self.db.get_name(self.player2),
+                        ),
+                        caption=player_text,
+                        filename=self.image_filename,
+                        reply_markup=keyboard,
+                    )
+                    if player_chatid
+                    else None
                 )
 
             if opponent_chatid:
-                if self.player_msg:
+                if self.opponent_msg:
                     self.opponent_msg = self.opponent_msg.edit_media(
                         media=InputMediaPhoto(
-                            media.board_image(self.states[-1], prev_move=self.last_move),
+                            media.board_image(
+                                self.states,
+                                player1_name=self.db.get_name(self.player1),
+                                player2_name=self.db.get_name(self.player2),
+                            ),
                             caption=opponent_text,
                             filename=self.image_filename,
                         )
@@ -626,7 +745,11 @@ class PMMatch(BaseMatch):
                 else:
                     self.opponent_msg = self.bot.send_photo(
                         opponent_chatid,
-                        media.board_image(self.states[-1], prev_move=self.last_move),
+                        media.board_image(
+                            self.states,
+                            player1_name=self.db.get_name(self.player1),
+                            player2_name=self.db.get_name(self.player2),
+                        ),
                         caption=opponent_text,
                         filename=self.image_filename,
                     )
@@ -638,7 +761,11 @@ class PMMatch(BaseMatch):
         if args[0] == "INIT_MSG":
             self.player_msg = self.player_msg.edit_media(
                 media=InputMediaPhoto(
-                    media.board_image(self.states[-1], prev_move=self.last_move),
+                    media.board_image(
+                        self.states,
+                        player1_name=self.db.get_name(self.player1),
+                        player2_name=self.db.get_name(self.player2),
+                    ),
                     caption=self.init_msg_text,
                     filename=self.image_filename,
                 ),
@@ -655,7 +782,7 @@ class PMMatch(BaseMatch):
             piece_buttons = [{"text": "Назад", "data": ["INIT_MSG"]}]
             for piece in allies:
                 if next(
-                    filter(self.states[-1].is_legal, piece.get_moves()),
+                    filter(lambda x: x.is_legal(), piece.get_moves()),
                     None,
                 ):
                     piece_buttons.append(
@@ -667,7 +794,11 @@ class PMMatch(BaseMatch):
 
             self.player_msg = self.player_msg.edit_media(
                 media=InputMediaPhoto(
-                    media.board_image(self.states[-1], prev_move=self.last_move),
+                    media.board_image(
+                        self.states,
+                        player1_name=self.db.get_name(self.player1),
+                        player2_name=self.db.get_name(self.player2),
+                    ),
                     caption="\n".join(new_text),
                     filename=self.image_filename,
                 ),
@@ -675,28 +806,30 @@ class PMMatch(BaseMatch):
             )
 
         elif args[0] == "SURRENDER":
-            self.finished = True
-            video, thumb = media.board_video(self)
-            for msg in [self.msg1, self.msg2]:
-                if msg:
-                    msg.edit_media(
-                        media=InputMediaVideo(
-                            video,
-                            caption=f"""
+            self.result = "0-1" if self.states[-1].is_white_turn else "1-0"
+            text=f"""
 Игра окончена: {self.db.get_name(player)} сдался.
 Победитель: {self.db.get_name(opponent)}.
-Ходов: {self.states[-1].turn - 1}.
-                            """,
-                            filename=self.video_filename,
-                            thumb=thumb,
-                        )
-                    )
+Ходов: {self.states[-1].turn - 1}."""
+            eval_thread = threading.Thread(target=self._send_analysis_video, args=(text,))
+            eval_thread.start()
+            last_boardimg = InputMediaPhoto(media.board_image(
+                    self.states,
+                    player1_name=self.db.get_name(self.player1),
+                    player2_name=self.db.get_name(self.player2),
+                ),
+                caption="Игра окончена, проводится анализ партии, пожалуйста подождите...",
+                filename=self.image_filename,
+            )
+            self.player_msg = self.player_msg.edit_media(last_boardimg)
+            if self.opponent_msg:
+                self.player_msg = self.player_msg.edit_media(last_boardimg)
 
         elif args[0] == "CHOOSE_PIECE":
             args[1] = decode_pos(args[1])
             dest_buttons = [{"text": "Назад", "data": ["TURN"]}]
             piece = self.states[-1][args[1]]
-            moves = list(filter(self.states[-1].is_legal, piece.get_moves()))
+            moves = list(filter(lambda x: x.is_legal(), piece.get_moves()))
             for move in moves:
                 if move.is_promotion:
                     dest_buttons.append(
@@ -709,7 +842,7 @@ class PMMatch(BaseMatch):
                     dest_buttons.append(
                         {
                             "text": MOVETYPE_MARKERS[move.type] + encode_pos(move.dst),
-                            "data": ["MOVE", move.pgn],
+                            "data": ["MOVE", move.pgn_encode()],
                         }
                     )
 
@@ -719,10 +852,11 @@ class PMMatch(BaseMatch):
             self.player_msg = self.player_msg.edit_media(
                 media=InputMediaPhoto(
                     media.board_image(
-                        self.states[-1],
-                        prev_move=self.last_move,
+                        self.states,
                         selected=args[1],
                         possible_moves=moves,
+                        player1_name=self.db.get_name(self.player1),
+                        player2_name=self.db.get_name(self.player2),
                     ),
                     caption="\n".join(new_text),
                     filename=self.image_filename,
@@ -733,12 +867,21 @@ class PMMatch(BaseMatch):
         elif args[0] == "PROMOTION_MENU":
             args[1] = decode_pos(args[1])
             args[2] = decode_pos(args[2])
-            move = self.states[-1][args[1]].create_move(args[2], new_piece=pieces.Queen)
+            move = core.Move.from_piece(self.states[-1][args[1]], args[2], new_piece="q")
             pieces = [
-                {"text": "Ферзь", "data": ["MOVE", move.pgn]},
-                {"text": "Конь", "data": ["MOVE", move.copy(new_piece=pieces.Knight).pgn]},
-                {"text": "Слон", "data": ["MOVE", move.copy(new_piece=pieces.Bishop).pgn]},
-                {"text": "Ладья", "data": ["MOVE", move.copy(new_piece=pieces.Rook).pgn]},
+                {"text": "Ферзь", "data": ["MOVE", move.pgn_encode()]},
+                {
+                    "text": "Конь",
+                    "data": ["MOVE", move.copy(new_piece="n").pgn_encode()],
+                },
+                {
+                    "text": "Слон",
+                    "data": ["MOVE", move.copy(new_piece="b").pgn_encode()],
+                },
+                {
+                    "text": "Ладья",
+                    "data": ["MOVE", move.copy(new_piece="r").pgn_encode()],
+                },
             ]
 
             new_text = self.init_msg_text.split("\n")
@@ -747,10 +890,11 @@ class PMMatch(BaseMatch):
             self.player_msg = self.player_msg.edit_media(
                 media=InputMediaPhoto(
                     media.board_image(
-                        self.states[-1],
-                        prev_move=self.last_move,
+                        self.states,
                         selected=args[1],
                         possible_moves=[move],
+                        player1_name=self.db.get_name(self.player1),
+                        player2_name=self.db.get_name(self.player2),
                     ),
                     caption="\n".join(new_text),
                     filename=self.image_filename,
@@ -759,39 +903,33 @@ class PMMatch(BaseMatch):
             )
 
         elif args[0] == "MOVE":
-            return self.init_turn(move=board.Move.from_pgn(args[1], self.states[-1]))
+            return self.init_turn(move=core.Move.from_pgn(args[1], self.states[-1]))
 
 
 class AIMatch(PMMatch):
-    engine_filename = "./stockfish_14_x64"
+    PRESET_1 = (0, 1, 1, 2, 2, 2, 2)
+    PRESET_2 = (0, 1, 1, 2, 2)
+    PRESET_3 = (0, 1, 2)
+    PRESET_4 = (0,)
+    EVAL_DEPTH = 18
 
     def __init__(self, player: User, chat_id: int, player2: User = None, **kwargs):
         ai_player = player2 if player2 else kwargs["bot"].get_me()
         self.ai_rating: int = None
         super().__init__(player, ai_player, chat_id, 0, **kwargs)
-        self.engine_api = subprocess.Popen(
-            self.engine_filename,
-            bufsize=1,
-            universal_newlines=True,
-            shell=True,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-        )
-
-        self.engine_api.stdout.readline()
-        self.engine_api.stdin.write("setoption name UCI_LimitStrength value true\n")
+        self.engine = analysis.ChessEngine(self.ENGINE_FILENAME)
 
     @classmethod
     def from_dict(cls, obj: JSON, match_id: int, bot=Bot) -> "AIMatch":
         logging.debug(f"Constructing {cls.__name__} object: {obj}")
         player = User.de_json(obj["player1"] | {"is_bot": False}, bot)
         new = cls(player, obj["chat_id1"], bot=bot, id=match_id)
-        new.states = [board.BoardInfo.from_fen(fen) for fen in obj["states"]]
+        new.states, new.result = decode_pgn_moveseq(obj["moves"])
         new.init_msg_text = obj["msg_text"]
-        new.set_elo(obj["ai_rating"])
+        new.engine.set_move_probabilities(getattr(new, f"PRESET_{obj['diff']}"))
         new.msg1 = Message(
             obj["msg_id1"],
-            time.monotonic,
+            datetime.datetime.now().timestamp(),
             Chat(obj["chat_id1"], "private", bot=bot),
             bot=bot,
             caption=obj["msg_text"],
@@ -804,52 +942,35 @@ class AIMatch(PMMatch):
         del res["player2"]
         del res["msg_id2"]
         del res["chat_id2"]
-        res.update({"ai_rating": self.ai_rating, "type": "AI"})
+        res.update({"diff": self.difficulty, "type": "AI"})
         return res
-
-    def set_elo(self, value: int) -> None:
-        self.ai_rating = value
-        self.engine_api.stdin.write(f"setoption name UCI_Elo value {value}\n")
 
     def init_turn(self, setup: bool = False, **kwargs) -> None:
         if setup:
             self.msg1 = self.bot.send_photo(
                 self.chat_id1,
-                media.board_image(self.states[-1], prev_move=self.last_move),
+                media.board_image(self.states),
                 caption="Выберите уровень сложности:",
                 filename=self.image_filename,
                 reply_markup=self._keyboard(
                     [
-                        {"text": "Низкий", "data": ["SKILL_LEVEL", "1350"]},
-                        {"text": "Средний", "data": ["SKILL_LEVEL", "1850"]},
-                        {"text": "Высокий", "data": ["SKILL_LEVEL", "2350"]},
-                        {"text": "Легендарный", "data": ["SKILL_LEVEL", "2850"]},
+                        {"text": "Низкий", "data": ["SKILL_LEVEL", 1]},
+                        {"text": "Средний", "data": ["SKILL_LEVEL", 2]},
+                        {"text": "Высокий", "data": ["SKILL_LEVEL", 3]},
+                        {"text": "Неограниченный", "data": ["SKILL_LEVEL", 4]},
                     ],
                     self.player1.id,
                 ),
             )
 
         else:
-            turn_info = BaseMatch.init_turn(self, **kwargs)
-            if self.finished:
-                return super().init_turn(self, call_parent_method=False, **kwargs)
-
-            self.engine_api.stdin.write(f"position fen {self.states[-1].fen}\n")
-            self.engine_api.stdin.write(f"go depth 2\n")
-            for line in self.engine_api.stdout:
-                if "bestmove" in line:
-                    turn = line.split(" ")[1].strip("\n")
-                    break
-            return super().init_turn(
-                move=self.states[-1][decode_pos(turn[:2])].create_move(
-                    decode_pos(turn[2:4]),
-                    new_piece=getattr(pieces, FENSYMBOLS[turn[-1]]) if len(turn) == 5 else None,
-                ),
-            )
+            super().init_turn(**kwargs)
+            return super().init_turn(self.engine.get_move(self.states[-1], self.EVAL_DEPTH))
 
     def handle_input(self, args):
         if args[0] == "SKILL_LEVEL":
-            self.set_elo(args[1])
+            self.difficulty = args[1]
+            self.engine.set_move_probabilities(getattr(self, f"PRESET_{args[1]}"))
             return super().init_turn()
         else:
             return super().handle_input(args)

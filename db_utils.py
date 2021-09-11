@@ -141,8 +141,7 @@ if __name__ == "__main__":
             key = key.decode()
             if conn.type(key) == b"string":
                 res[key] = gzip.decompress(conn.get(key)).decode()
-                if key.startswith("ptb"):
-                    res[key] = json.loads(res[key]) if res[key] else res[key]
+                res[key] = json.loads(res[key]) if res[key] else res[key]
             elif conn.type(key) == b"set":
                 res[key] = [i.decode() for i in conn.sscan_iter(key)]
 

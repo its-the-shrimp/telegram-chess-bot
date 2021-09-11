@@ -12,7 +12,7 @@ logging.basicConfig(
 )
 
 if os.path.exists("debug_env.json"):
-    chess.AIMatch.engine_filename = "./stockfish"
+    chess.BaseMatch.ENGINE_FILENAME = "./stockfish"
     with open("debug_env.json") as r:
         os.environ.update(json.load(r))
 
@@ -167,7 +167,7 @@ def boardgame_menu(update, context):
 
 
 @avoid_spam
-def button_callback(update, context):
+def button_callback(update: tg.Update, context: db_utils.RedisContext):
     args = parse_callbackquery_data(update.callback_query.data)
     logging.debug(f"Handling user input: {args}")
     if (
@@ -186,6 +186,18 @@ def button_callback(update, context):
     if args["target_id"] == "MAIN":
         if args["args"][0] == "NA":
             update.callback_query.answer(text="Недоступно", show_alert=True)
+        elif args["args"][0] == "DOWNLOAD":
+            content = context.db.get(f"{args['args'][1]}:pgn")
+            update.effective_message.edit_reply_markup()
+            if content:
+                update.effective_message.reply_document(
+                    gzip.decompress(content), 
+                    caption="Запись партии в формате PGN",
+                    filename=f"chess4u-{args['args'][1]}.pgn"
+                )
+                context.db.delete(f"{args['args'][1]}:pgn")
+            else:
+                update.callback_query.answer("Прошло более 48 часов после окончания партии", show_alert=True)
         elif args["args"][0] == "ANON_MODE_OFF":
             context.db.anon_mode_off(update.effective_user)
             update.callback_query.answer("Анонимный режим отключен", show_alert=True)
@@ -282,7 +294,7 @@ def button_callback(update, context):
                 args["args"]
             )
             res = res if res else (None, False)
-            if context.bot_data["matches"][args["target_id"]].finished:
+            if context.bot_data["matches"][args["target_id"]].result != "*":
                 del context.bot_data["matches"][args["target_id"]]
             update.callback_query.answer(text=res[0], show_alert=res[1])
         else:

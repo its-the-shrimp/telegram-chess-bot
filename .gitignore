@@ -7,3 +7,4 @@ stockfish
 .vscode
 chess/__pycache__
 images/temp/*
+test*
