@@ -122,6 +122,10 @@ class RedisPersistence(DictPersistence):
 
 
 class RedisContext(CallbackContext):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.langtable: dict[str, str] = {}
+
     @property
     def db(self):
         return self.dispatcher.persistence.conn

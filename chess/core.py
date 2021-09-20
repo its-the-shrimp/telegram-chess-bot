@@ -210,13 +210,9 @@ class BasePiece:
         else:
             return chr(move.src.column + 97)
 
-    def get_moves(
-        self, all: bool = False, only_capturing: bool = False, **kwargs
-    ) -> list["Move"]:
-        moves = self._get_moves(
-            self.pos, self.is_white, self.board, all=all, only_capturing=only_capturing
-        )
-        return [Move.from_piece(self, dst) for dst in moves]
+    def get_moves(self, **kwargs) -> list["Move"]:
+        moves = [Move.from_piece(self, dst) for dst in self._get_moves(self.pos, self.is_white, self.board, **kwargs)]
+        return list(filter(Move.is_legal, moves))
 
     def copy(self) -> "BasePiece":
         new = type(self)(self.pos, self.board, self.is_white)
@@ -239,6 +235,7 @@ class Pawn(BasePiece):
         reverse: bool = False,
         all: bool = False,
         only_capturing: bool = False,
+        **kwargs
     ) -> list[BoardPoint]:
         positions = []
         diffs = [[i[0], i[1] * (1 if is_white else -1)] for i in cls.move_diffs]
@@ -263,7 +260,7 @@ class Pawn(BasePiece):
                 if any(
                     [
                         abs(diff[0]) == 1
-                        and getattr(existing_piece, "is_white", is_white) != is_white,
+                        and (getattr(existing_piece, "is_white", is_white) != is_white or all),
                         abs(diff[0]) == 1 and board.enpassant_pos[1] == (pos if reverse else move_dst),
                         diff[1] == direction * 2
                         and not board[move_dst._replace(row=move_dst.row - direction)]
@@ -318,11 +315,12 @@ class Rook(BasePiece):
         for diff_seq in cls.move_diffs:
             for diff in diff_seq:
                 move = BoardPoint(*[i + d for i, d in zip(pos, diff)])
+                #print(encode_pos(move), move in allies_pos and not all, not in_bounds(move))
                 if (move in allies_pos and not all) or not in_bounds(move):
                     break
                 else:
                     moves.append(move)
-                    if move in enemies_pos or (all and move in allies_pos):
+                    if move in enemies_pos or move in enemies_pos:
                         break
 
         return moves
@@ -358,48 +356,91 @@ class King(BasePiece):
     def get_moves(
         self, for_fen: bool = False, castling: bool = True, **kwargs
     ) -> list["Move"]:
-        moves = self._get_moves(self.pos, self.is_white, self.board, **kwargs)
+        moves = super().get_moves()
 
         if castling and not self.moved and not self.in_check():
             Y = 0 if self.is_white else 7
-            a_rook = self.board[0, Y]
-            h_rook = self.board[7, Y]
-            if (
-                all([not self.board[x, Y] or for_fen for x in [1, 2, 3]])
-                and a_rook
-                and not a_rook.moved
-            ):
-                moves.append(BoardPoint(2, Y))
-            if (
-                all([not self.board[x, Y] or for_fen for x in [5, 6]])
-                and h_rook
-                and not h_rook.moved
-            ):
-                moves.append(BoardPoint(6, Y))
+            for possible_column in range(self.pos.column):
+                queenside_rook = self.board[possible_column, Y]
+                if type(queenside_rook) == Rook and queenside_rook.is_white == self.is_white:
+                    break
+            for possible_column in range(self.pos.column + 1, 8):
+                kingside_rook = self.board[possible_column, Y]
+                if type(kingside_rook) == Rook and kingside_rook.is_white == self.is_white:
+                    break
 
-        return [Move.from_piece(self, move) for move in moves]
+            if queenside_rook and not queenside_rook.moved:
+                moves.append(Move.from_piece(self, BoardPoint(2, Y)))
+                for mid_column in range(min(2, queenside_rook.pos.column + 1), self.pos.column):
+                    mid_pos = BoardPoint(mid_column, Y)
+                    if (self._in_check(mid_pos, self.is_white, self.board) or self.board[mid_pos]) and not for_fen:
+                        del moves[-1]
+                        break
+            if kingside_rook and not kingside_rook.moved:
+                moves.append(Move.from_piece(self, BoardPoint(6, Y)))
+                for mid_column in range(self.pos.column + 1, max(7, kingside_rook.pos.column)):
+                    mid_pos = BoardPoint(mid_column, Y)
+                    if (self._in_check(mid_pos, self.is_white, self.board) or self.board[mid_pos]) and not for_fen:
+                        del moves[-1]
+                        break
+
+        return moves
 
     def in_checkmate(self):
-        checks = []
-        for piece in self.allied_pieces:
-            for move in piece.get_moves():
-                checks.append(move)
+        allied_moves = itertools.chain(*[piece.get_moves() for piece in self.allied_pieces])
 
-        return (
-            next(filter(lambda x: x.is_legal(), checks), None) is None
-            and self.in_check()
-        )
+        return next(allied_moves, None) is None and self.in_check()
 
-    def in_check(self):
-        enemy_moves = itertools.chain(
-            *[i.get_moves(castling=False) for i in self.enemy_pieces]
-        )
-        return self.pos in [i.dst for i in enemy_moves]
+    @classmethod
+    def _in_check(cls, pos: BoardPoint, is_white: bool, board: "BoardInfo") -> bool:
+        for cls in (Rook, Bishop):
+            for move_seq in cls.move_diffs:
+                for diff in move_seq:
+                    pos = BoardPoint(*[i + d for i, d in zip(diff, pos)])
+                    piece = board[pos]
+                    if type(piece) in (cls, Queen) and piece.is_white != is_white:
+                        return True
+                    elif isinstance(piece, BasePiece) and piece.is_white == is_white:
+                        break
+
+        for cls in (King, Knight):
+            for diff in cls.move_diffs:
+                piece = board[BoardPoint(*[i + d for i, d in zip(diff, pos)])]
+                if type(piece) == cls and piece.is_white != is_white:
+                    return True
+
+        for diff in ((1, 1 if is_white else -1), (-1, 1 if is_white else -1)):
+            piece = board[BoardPoint(*[i + d for i, d in zip(diff, pos)])]
+            if type(piece) == Pawn and piece.is_white != is_white:
+                return True
+
+        return False
+    
+    def in_check(self) -> bool:
+        return self._in_check(self.pos, self.is_white, self.board)
 
 
 class Move:
+    PROMOTION_FLAGS = {
+        "Knight": "00",
+        "Bishop": "01",
+        "Rook": "10",
+        "Queen": "11",
+    }
+
     @classmethod
-    def from_piece(cls, piece, dst: BoardPoint, new_piece: str = "") -> "Move":
+    def from_hash(cls, src: int, board: "BoardInfo") -> "Move":
+        src = f"{src:0>16b}"[:-1]
+        src_column, src_row, dst_column, dst_row = (int(src[i * 3:i * 3 + 3], 2) for i in range(4))
+        promotion = src[-3:]
+        if promotion[0] == "1":
+            new_piece = eval({v: k for k, v in cls.PROMOTION_FLAGS.items()}[promotion[1:]]).fen_symbol[0]
+        else:
+            new_piece = ""
+        return Move.from_piece(board[src_column, src_row], BoardPoint(dst_column, dst_row), new_piece=new_piece)
+
+    @classmethod
+    def from_piece(cls, piece: BasePiece, dst: BoardPoint, new_piece: str = "") -> "Move":
         if piece.board.enpassant_pos[1] == dst:
             killed_piece = piece.board[piece.board.enpassant_pos[0]]
         else:
@@ -520,7 +561,11 @@ class Move:
         self.evaluation = evaluation
 
     def __hash__(self):
-        return hash(self.board.fen + self.pgn_encode())
+        res = f"{self.src.column:0>3b}{self.src.row:0>3b}{self.dst.column:0>3b}{self.dst.row:0>3b}"
+        res += str(int(self.is_promotion))
+        res += self.PROMOTION_FLAGS[self.new_piece.__name__ if res[-1] == "1" else "Knight"]
+        res += "0"
+        return int(res, 2)
 
     def __repr__(self):
         return f"Move({self.pgn_encode()})"
@@ -546,8 +591,8 @@ class Move:
 
     @property
     def enpassant_pos(self) -> list[Optional[BoardPoint]]:
-        if self.piece == Pawn and abs(self.src[1] - self.dst[1]) == 2:
-            return [self.dst, BoardPoint(self.dst[0], (self.src[1] + self.dst[1]) // 2)]
+        if self.piece == Pawn and abs(self.src.row - self.dst.row) == 2:
+            return [self.dst, BoardPoint(self.dst.column, (self.src.row + self.dst.row) // 2)]
         return [None, None]
 
     @property
@@ -574,17 +619,25 @@ class Move:
     @property
     def rook_src(self) -> Optional[BoardPoint]:
         if not self.is_castling:
-            return None
+            return
 
         if self.src.column > self.dst.column:
-            return BoardPoint(0, self.src.row)
+            for possible_column in range(self.src.column):
+                rook = self.board[possible_column, self.src.row]
+                if type(rook) == Rook and rook.is_white == self.is_white:
+                    return rook.pos
         else:
-            return BoardPoint(7, self.src.row)
+            for possible_column in range(self.src.column + 1, 8):
+                rook = self.board[possible_column, self.src.row]
+                if type(rook) == Rook and rook.is_white == self.is_white:
+                    return rook.pos
+
+        raise RuntimeError
 
     @property
     def rook_dst(self) -> Optional[BoardPoint]:
         if not self.is_castling:
-            return None
+            return
 
         if self.src.column > self.dst.column:
             return BoardPoint(3, self.dst.row)
@@ -615,28 +668,25 @@ class Move:
 
     def copy(self, **params) -> "Move":
         defaults = {
+            "is_white": self.is_white,
             "board_obj": self.board,
             "src": self.src,
             "dst": self.dst,
             "piece": self.piece,
             "killed": self.killed,
-            "rook_src": self.rook_src,
-            "rook_dst": self.rook_dst,
             "new_piece": self.new_piece,
         }
 
         return type(self)(**(defaults | params))
 
     def is_legal(self):
-        if self.killed == King:
-            return False
         test_obj = self.board + self
         return not test_obj["k", self.board.is_white_turn][0].in_check()
 
 
 class BoardInfo:
     @classmethod
-    def from_fen(cls, fen: str) -> None:
+    def from_fen(cls, fen: str) -> "BoardInfo":
         res = []
         (
             board,
@@ -649,38 +699,40 @@ class BoardInfo:
 
         is_white_turn = is_white_turn == "w"
 
-        if enpassant_pos == "-":
-            enpassant_pos = [None, None]
-        else:
-            enpassant_pos = decode_pos(enpassant_pos)
-            enpassant_pos = [
-                [enpassant_pos[0], int((enpassant_pos[1] + 4.5) // 2)],
-                enpassant_pos,
-            ]
+        enpassant_pos = decode_pos(enpassant_pos)
 
-        for (column, line), char in _decode_fen(board).items():
-            new = eval(FENSYMBOLS[char.lower()])(
-                BoardPoint(column, line), None, char.isupper()
-            )
-            K = "K" if new.is_white else "k"
-            Q = "Q" if new.is_white else "q"
-            if type(new) == King and K not in castlings and Q not in castlings:
-                new.moved = True
-            elif (
-                type(new) == Rook
-                and K not in castlings
-                and Q in castlings
-                and new.pos != [0, 0 if new.is_white else 7]
-            ):
-                new.moved = True
-            elif (
-                type(new) == Rook
-                and K in castlings
-                and Q not in castlings
-                and new.pos != [7, 0 if new.is_white else 7]
-            ):
-                new.moved = True
-            res.append(new)
+        board = board.split("/")
+        for line in range(8):
+            offset = 0
+            for column in range(8):
+                if column + offset > 7:
+                    break
+                char = board[line][column]
+                if char.isdigit():
+                    offset += int(char) - 1
+                else:
+                    new = eval(FENSYMBOLS[char.lower()])(
+                        BoardPoint(column + offset, 7 - line), 
+                        None,
+                        char.isupper()
+                    )
+                    K = "K" if new.is_white else "k"
+                    Q = "Q" if new.is_white else "q"
+                    if type(new) == King and K not in castlings and Q not in castlings:
+                        new.moved = True
+                    elif (
+                        type(new) == Rook
+                        and Q not in castlings
+                        and new.pos.column == 0
+                    ):
+                        new.moved = True
+                    elif (
+                        type(new) == Rook
+                        and K not in castlings
+                        and new.pos == 7
+                    ):
+                        new.moved = True
+                    res.append(new)
 
         return cls(
             res,
@@ -694,14 +746,20 @@ class BoardInfo:
         cls,
         board: list[BasePiece],
         is_white_turn: bool = True,
-        enpassant_pos: list[BoardPoint] = [None, None],
+        enpassant_pos: list[BoardPoint] = None,
         empty_halfturns: int = 0,
         turn: int = 1,
     ):
         self = object.__new__(cls)
         self.board = board
         self.is_white_turn = is_white_turn
-        self.enpassant_pos = enpassant_pos
+        if enpassant_pos:
+            self.enpassant_pos = [            
+                    BoardPoint(enpassant_pos.column, int((enpassant_pos.column + 4.5) // 2)),
+                    enpassant_pos,
+                ]
+        else:
+            self.enpassant_pos = [None, None]  # #0 - actual position of the piece; #1 - position to move the pawn capturing en-passant to.
         self.empty_halfturns = empty_halfturns
         self.turn = turn
 
@@ -714,7 +772,7 @@ class BoardInfo:
         return f"BoardInfo({self.fen})"
 
     def __hash__(self):
-        return hash(self.fen)
+        return hash(self._fen_board())
 
     def __eq__(self, other: "BoardInfo"):
         for attr in ["__class__", "board", "castlings", "enpassant_pos"]:
@@ -756,11 +814,11 @@ class BoardInfo:
             empty_halfturns=0
             if move.is_capturing or move.piece == Pawn
             else self.empty_halfturns + 1,
-            enpassant_pos=move.enpassant_pos,
+            enpassant_pos=move.enpassant_pos[1],
         )
         piece = new[move.src]
 
-        if move.is_capturing:
+        if move.is_capturing and move.killed != King:
             del new[move.capture_dst]
         if move.is_promotion:
             del new[move.src]
@@ -775,7 +833,7 @@ class BoardInfo:
 
         return new
 
-    def __getitem__(self, *keys):
+    def __getitem__(self, *keys) -> Union[BasePiece, list[BasePiece]]:
         keys = keys[0]
         if type(keys) == int:
             return self.get_by_pos(keys, None)
@@ -800,6 +858,21 @@ class BoardInfo:
                 return
 
         raise ValueError(f"piece to remove not found on {encode_pos(pos)}.")
+
+    def _fen_board(self) -> str:
+        res = ""
+        for row in range(7, -1, -1):
+            for column in range(0, 8):
+                piece = self[column, row]
+                if piece:
+                    res += piece.fen_symbol
+                elif res and res[-1].isdigit():
+                    res = res[:-1] + str(int(res[-1]) + 1)
+                else:
+                    res += "1"
+            res += "/"
+
+        return res[:-1]
 
     @property
     def whites(self) -> Iterator[BasePiece]:
@@ -830,21 +903,9 @@ class BoardInfo:
 
     @property
     def fen(self):
-        board = []
-        for row in range(7, -1, -1):
-            board.append("")
-            for column in range(0, 8):
-                piece = self[column, row]
-                if piece:
-                    board[-1] += piece.fen_symbol
-                elif board[-1] and board[-1][-1].isdigit():
-                    board[-1] = board[-1][:-1] + str(int(board[-1][-1]) + 1)
-                else:
-                    board[-1] += "1"
-
         return " ".join(
             (
-                "/".join(board),
+                self._fen_board(),
                 "w" if self.is_white_turn else "b",
                 self.castlings,
                 encode_pos(self.enpassant_pos[1]) if self.enpassant_pos[0] else "-",
@@ -870,7 +931,7 @@ class BoardInfo:
     def copy(self, **new_params):
         params = {
             "is_white_turn": self.is_white_turn,
-            "enpassant_pos": self.enpassant_pos,
+            "enpassant_pos": self.enpassant_pos[1],
             "empty_halfturns": self.empty_halfturns,
             "turn": self.turn,
         }

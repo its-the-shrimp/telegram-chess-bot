@@ -1,4 +1,5 @@
 import collections
+from typing import Optional
 
 FENSYMBOLS = {
     "k": "King",
@@ -13,8 +14,8 @@ STARTPOS = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 BoardPoint = collections.namedtuple("BoardPoint", ("column", "row"), module="chess")
 
 
-def decode_pos(pos: str) -> BoardPoint:
-    return BoardPoint(ord(pos[0]) - 97, int(pos[1]) - 1)
+def decode_pos(pos: str) -> Optional[BoardPoint]:
+    return BoardPoint(ord(pos[0]) - 97, int(pos[1]) - 1) if pos != "-" else None
 
 
 def encode_pos(pos: BoardPoint) -> str:

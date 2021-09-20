@@ -1,10 +1,10 @@
 __pycache__/
 .ipynb_checkpoints/
 *.ipynb
-*.json
 stockfish
 .DS_Store
 .vscode
 chess/__pycache__
 images/temp/*
 test*
+debug*

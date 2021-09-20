@@ -1,5 +1,6 @@
 import gzip
 import itertools
+import json
 import random
 from telegram import (
     InlineKeyboardMarkup,
@@ -16,12 +17,12 @@ import datetime
 import threading
 from .utils import *
 from . import core, media, analysis
-from typing import Any, Union, Optional
+from typing import Any, List, Union, Optional
 
 IDSAMPLE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-+"
 MOVETYPE_MARKERS = {"normal": "", "killing": "❌", "castling": "🔀", "promotion": "⏫"}
-
 JSON = dict[str, Union[str, dict]]
+langtable = {k: v["chess"] for k, v in json.load(open("langtable.json")).items()}
 
 
 def _group_items(obj: list[Any], n: int, head_item: bool = False) -> list[list[Any]]:
@@ -61,7 +62,6 @@ def decode_pgn_seq(pgn: str) -> list[core.BoardInfo]:
 
 class BaseMatch:
     ENGINE_FILENAME = "./stockfish_14_x64"
-    WRONG_PERSON_MSG = "Сейчас не ваш ход!"
     db = None
 
     def __init__(self, bot=None, id=None):
@@ -70,10 +70,11 @@ class BaseMatch:
         self.bot: Bot = bot
         self.states: list[core.BoardInfo] = [core.BoardInfo.from_fen(STARTPOS)]
         self.result = "*"
-        self.id: str = id if id else "".join(random.choices(IDSAMPLE, k=8))
+        self.id: str = (
+            id if id else "".join([random.choice(IDSAMPLE) for i in range(8)])
+        )
         self.image_filename: str = f"chess-{self.id}.jpg"
         self.video_filename: str = f"chess-{self.id}.mp4"
-        self.game_filename: str = f"telegram-chess-bot-{self.id}.pgn_encode()"
 
     def _keyboard(
         self,
@@ -105,7 +106,10 @@ class BaseMatch:
             return None
 
     def to_dict(self) -> JSON:
-        return {"type": "Base", "moves": core.get_pgn_moveseq(core.get_moves(self.states))}
+        return {
+            "type": "Base",
+            "moves": core.get_pgn_moveseq(core.get_moves(self.states)),
+        }
 
     @property
     def pieces(self) -> tuple[tuple[core.BasePiece]]:
@@ -157,20 +161,138 @@ class BaseMatch:
 
     def pgn_encode(self, headers: dict = {}):
         std_headers = {
-            "Event": "Online Chess on Telegram", 
-            "Site": "https://t.me/real_chessbot", 
+            "Event": "Online Chess on Telegram",
+            "Site": "t.me/real_chessbot",
             "Date": datetime.datetime.now().strftime("%Y.%m.%d"),
             "Round": 1,
-            "White": self.db.get_name(self.player1) if self.db and hasattr(self, "player1") else "?",
-            "Black": self.db.get_name(self.player2) if self.db and hasattr(self, "player2") else "?",
-            "Result": self.result
+            "White": self.db.get_name(self.player1)
+            if self.db and hasattr(self, "player1")
+            else "?",
+            "Black": self.db.get_name(self.player2)
+            if self.db and hasattr(self, "player2")
+            else "?",
+            "Result": self.result,
         }
         headers = std_headers | headers
 
         encoded = "\n".join([f'[{k} "{v}"]' for k, v in headers.items()])
-        return encoded + "\n\n" + core.get_pgn_moveseq(core.get_moves(self.states), result=self.result)
+        return (
+            encoded
+            + "\n\n"
+            + core.get_pgn_moveseq(core.get_moves(self.states), result=self.result)
+        )
 
-    #def send_finish_msg(self, msg: Message, text: str):
+    def _send_analysis_video(self, lang_code: str, text: str):
+        analyser = analysis.ChessEngine(BaseMatch.ENGINE_FILENAME)
+        video, thumb = media.board_video(self, lang_code, analyser=analyser)
+        new_msg = InputMediaVideo(
+            video, caption=text, filename=self.video_filename, thumb=thumb
+        )
+        self.db.set(
+            f"{self.id}:pgn", gzip.compress(self.pgn_encode().encode()), ex=3600 * 48
+        )
+        if hasattr(self, "msg"):
+            self.msg = self.msg.edit_media(
+                media=new_msg,
+                reply_markup=self._keyboard(
+                    [
+                        {
+                            "text": langtable[lang_code]["download-pgn"],
+                            "data": ["DOWNLOAD", self.id],
+                        }
+                    ],
+                    expected_uid=self.players[0].id,
+                    handler_id="MAIN",
+                ),
+            )
+        elif hasattr(self, "player_msg"):
+            if self.player_msg:
+                self.player_msg = self.player_msg.edit_media(
+                    media=new_msg,
+                    reply_markup=self._keyboard(
+                        [
+                            {
+                                "text": langtable[lang_code]["download-pgn"],
+                                "data": ["DOWNLOAD", self.id],
+                            }
+                        ],
+                        expected_uid=self.players[0].id,
+                        handler_id="MAIN",
+                    ),
+                )
+            if self.opponent_msg:
+                self.opponent_msg = self.opponent_msg.edit_media(
+                    media=new_msg,
+                    reply_markup=self._keyboard(
+                        [
+                            {
+                                "text": langtable[lang_code]["download-pgn"],
+                                "data": ["DOWNLOAD", self.id],
+                            }
+                        ],
+                        expected_uid=self.players[1].id,
+                        handler_id="MAIN",
+                    ),
+                )
+        else:
+            raise ValueError
+
+    def send_analysis_video(self, lang_code: str, state: str) -> None:
+        if state in ("checkmate", "resignation"):
+            player, opponent = self.players
+            title_text = langtable[lang_code][state].format(
+                name=self.db.get_name(player)
+            )
+            text = "\n".join(
+                [
+                    title_text,
+                    langtable[lang_code]["winner"].format(
+                        name=self.db.get_name(opponent)
+                    ),
+                    langtable[lang_code]["n-moves"].format(n=self.states[-1].turn - 1),
+                ]
+            )
+        else:
+            title_text = langtable[lang_code][state]
+            text = "\n".join(
+                [
+                    title_text,
+                    langtable[lang_code]["is-draw"],
+                    langtable[lang_code]["n-moves"].format(n=self.states[-1].turn - 1),
+                ]
+            )
+
+        eval_thread = threading.Thread(
+            name=self.id + ":eval",
+            target=self._send_analysis_video,
+            args=(
+                lang_code,
+                text,
+            ),
+        )
+        eval_thread.start()
+        last_boardimg = InputMediaPhoto(
+            media.board_image(
+                lang_code,
+                self.states,
+                player1_name=self.db.get_name(self.player1),
+                player2_name=self.db.get_name(self.player2),
+            ),
+            caption="\n".join(
+                [
+                    title_text,
+                    langtable[lang_code]["waiting-eval"],
+                ]
+            ),
+            filename=self.image_filename,
+        )
+        if hasattr(self, "msg"):
+            self.msg = self.msg.edit_media(media=last_boardimg)
+        elif hasattr(self, "player_msg"):
+            if self.player_msg:
+                self.player_msg = self.player_msg.edit_media(last_boardimg)
+            if self.opponent_msg:
+                self.player_msg = self.player_msg.edit_media(last_boardimg)
 
     def init_turn(self, move: core.Move = None) -> None:
         if move:
@@ -198,7 +320,7 @@ class GroupMatch(BaseMatch):
             bot=bot,
             id=match_id,
         )
-        new.states = decode_pgn_moveseq(obj["moves"])
+        new.states, new.result = decode_pgn_moveseq(obj["moves"])
         new.init_msg_text = obj["msg_text"]
         new.msg = Message(
             obj["msg_id"],
@@ -207,9 +329,6 @@ class GroupMatch(BaseMatch):
             bot=bot,
             caption=obj["msg_text"],
         )
-        new.turn += 1
-        new.empty_halfturns += 1
-        new.is_white_turn = not new.is_white_turn
 
         return new
 
@@ -243,7 +362,7 @@ class GroupMatch(BaseMatch):
         )
         return res
 
-    def init_turn(self, move: core.Move = None) -> None:
+    def init_turn(self, lang_code, move: core.Move = None) -> None:
         super().init_turn(move=move)
         player, opponent = self.players
         state = self.get_state()
@@ -252,78 +371,36 @@ class GroupMatch(BaseMatch):
         elif state == "checkmate":
             self.result = "0-1" if self.states[-1].is_white_turn else "1-0"
 
-        if state == "checkmate":
-            msg = f"""
-Игра окончена: шах и мат!
-Победитель: {self.db.get_name(opponent)}
-Ходов: {self.states[-1].turn - 1}.
-            """
-        elif state == "50-move-draw":
-            msg = f"""
-Игра окончена: за последние 50 ходов не было убито ни одной фигуры и не сдвинуто ни одной пешки.
-Ничья!
-Ходов: {self.states[-1].turn - 1}
-            """
-        elif state == "3fold-repetition-draw":
-            msg = f"""
-Игра окончена: одинаковая позиция доски возникла 3-ий раз подряд.
-Ничья!
-Ходов: {self.states[-1].turn - 1}
-            """
-        elif state == "stalemate-draw":
-            msg = f"""
-Игра окончена: у {"белых" if self.states[-1].is_white_turn else "черных"} не осталось ходов, но их король не под шахом.
-Ничья!
-Ходов: {self.states[-1].turn - 1}
-            """
-        elif state == "insufficient-material-draw":
-            msg = f"""
-Игра окончена: у обеих сторон недостаточно фигур, чтобы поставить мат.
-Ничья!
-Ходов: {self.states[-1].turn - 1}
-            """
+        if self.result != "*":
+            self.send_analysis_video(lang_code, state)
         else:
-            msg = f"Ход {self.states[-1].turn}"
-            if move:
-                msg += f"\n{move.piece.name}{' -> '+move.new_piece.name if move.is_promotion else ''}"
-                msg += f": {encode_pos(move.src)} -> {encode_pos(move.dst)}"
-                if move.is_castling:
-                    msg += f" ({'Короткая' if move.rook_src.column == 7 else 'Длинная'} рокировка)"
-                if move.is_capturing:
-                    msg += f"\n{move.killed.name} на {encode_pos(move.dst)} убит"
-                    msg += f"{'а' if move.killed.name in ['Пешка', 'Ладья'] else ''}!"
-                else:
-                    msg += "\n"
-            else:
-                msg += "\n\n"
+            msg = langtable[lang_code]["curr-move"].format(n=self.states[-1].turn)
 
             if state == "check":
-                msg += "\nИгроку поставлен шах!"
+                msg += langtable[lang_code]["opponent-in-check"].format(
+                    name=self.db.get_name(player)
+                )
             else:
                 msg += "\n"
 
-            msg += f"\nХодит { self.db.get_name(player) }; выберите действие:"
-
-        if self.result != "*":
-            video, thumb = media.board_video(self)
-            self.msg.edit_media(
-                media=InputMediaVideo(
-                    video,
-                    caption=msg,
-                    filename=self.video_filename,
-                    thumb=thumb,
-                )
+            msg += langtable[lang_code]["opponent-to-move"].format(
+                name=self.db.get_name(player)
             )
-        else:
+            msg += "; " + langtable[lang_code]["player-to-move"]
+
             keyboard = self._keyboard(
                 [
-                    {"text": "Ходить", "data": ["TURN"]},
-                    {"text": "Сдаться", "data": ["SURRENDER"]},
+                    {"text": langtable[lang_code]["move-button"], "data": ["TURN"]},
+                    {
+                        "text": langtable[lang_code]["resign-button"],
+                        "data": ["SURRENDER"],
+                    },
                 ],
                 player.id,
             )
             self.init_msg_text = msg
             img = media.board_image(
+                lang_code,
                 self.states,
                 player1_name=self.db.get_name(self.player1),
                 player2_name=self.db.get_name(self.player2),
@@ -346,7 +423,7 @@ class GroupMatch(BaseMatch):
                     reply_markup=keyboard,
                 )
 
-    def handle_input(self, args: list[Union[str, int]]) -> None:
+    def handle_input(self, lang_code: str, args: list[Union[str, int]]) -> None:
         player, opponent = self.players
         allies, _ = self.pieces
         if args[0] == "INIT_MSG":
@@ -354,27 +431,44 @@ class GroupMatch(BaseMatch):
                 self.init_msg_text,
                 reply_markup=self._keyboard(
                     [
-                        {"text": "Ходить", "data": ["TURN"]},
-                        {"text": "Сдаться", "data": ["SURRENDER"]},
+                        {"text": langtable[lang_code]["move-button"], "data": ["TURN"]},
+                        {
+                            "text": langtable[lang_code]["resign-button"],
+                            "data": ["SURRENDER"],
+                        },
                     ],
                     player.id,
                 ),
             )
 
         if args[0] == "TURN":
-            piece_buttons = [{"text": "Назад", "data": ["INIT_MSG"]}]
+            piece_buttons = [
+                {"text": langtable[lang_code]["back-button"], "data": ["INIT_MSG"]}
+            ]
             for piece in allies:
-                if next(filter(lambda x: x.is_legal(), piece.get_moves()), None):
+                if piece.get_moves():
                     piece_buttons.append(
-                        {"text": str(piece), "data": ["CHOOSE_PIECE", piece.pos]}
+                        {
+                            "text": langtable[lang_code]["piece-desc"].format(
+                                piece=langtable[lang_code][
+                                    type(piece).__name__.lower()
+                                ],
+                                pos=encode_pos(piece.pos),
+                            ),
+                            "data": ["CHOOSE_PIECE", piece.pos],
+                        }
                     )
 
             new_text = self.init_msg_text.split("\n")
-            new_text[-1] = f"Ходит {self.db.get_name(player)}; выберите фигуру:"
+            new_text[-1] = langtable[lang_code]["opponent-to-move"].format(
+                name=self.db.get_name(player)
+            )
+            new_text[-1] += "; " + langtable[lang_code]["player-to-choose-piece"]
 
             self.msg = self.msg.edit_media(
                 media=InputMediaPhoto(
                     media.board_image(
+                        lang_code,
                         self.states,
                         player1_name=self.db.get_name(self.player1),
                         player2_name=self.db.get_name(self.player2),
@@ -387,25 +481,14 @@ class GroupMatch(BaseMatch):
 
         elif args[0] == "SURRENDER":
             self.result = "0-1" if self.states[-1].is_white_turn else "1-0"
-            video, thumb = media.board_video(self)
-            self.msg = self.msg.edit_media(
-                media=InputMediaVideo(
-                    video,
-                    caption=f"""
-Игра окончена: {self.db.get_name(player)} сдался.
-Победитель: {self.db.get_name(opponent)}.
-Ходов: {self.states[-1].turn - 1}.
-                    """,
-                    filename=self.video_filename,
-                    thumb=thumb,
-                )
-            )
+            self.send_analysis_video(lang_code, "resignation")
 
         elif args[0] == "CHOOSE_PIECE":
             args[1] = decode_pos(args[1])
-            dest_buttons = [{"text": "Назад", "data": ["TURN"]}]
-            piece = self.states[-1][args[1]]
-            moves = list(filter(self.states[-1].is_legal, piece.get_moves()))
+            dest_buttons = [
+                {"text": langtable[lang_code]["back-button"], "data": ["TURN"]}
+            ]
+            moves = self.states[-1][args[1]].get_moves()
             for move in moves:
                 if move.is_promotion:
                     dest_buttons.append(
@@ -422,13 +505,19 @@ class GroupMatch(BaseMatch):
                         }
                     )
             new_text = self.init_msg_text.split("\n")
-            new_text[
-                -1
-            ] = f"Ходит {self.db.get_name(player)}; выберите новое место фигуры:"
+            new_text[-1] = "; ".join(
+                [
+                    langtable[lang_code]["opponent-to-move"].format(
+                        name=self.db.get_name(player)
+                    ),
+                    langtable[lang_code]["player-to-choose-dest"],
+                ]
+            )
 
             self.msg = self.msg.edit_media(
                 media=InputMediaPhoto(
                     media.board_image(
+                        lang_code,
                         self.states,
                         selected=args[1],
                         possible_moves=moves,
@@ -442,30 +531,41 @@ class GroupMatch(BaseMatch):
             )
 
         elif args[0] == "PROMOTION_MENU":
-            move = core.Move.from_piece(self.states[-1][args[1]], args[2], new_piece="q")
+            move = core.Move.from_piece(
+                self.states[-1][args[1]], args[2], new_piece="q"
+            )
             pieces = [
-                {"text": "Ферзь", "data": ["MOVE", move.pgn_encode()]},
                 {
-                    "text": "Конь",
+                    "text": langtable[lang_code]["queen"],
+                    "data": ["MOVE", move.pgn_encode()],
+                },
+                {
+                    "text": langtable[lang_code]["knight"],
                     "data": ["MOVE", move.copy(new_piece="n").pgn_encode()],
                 },
                 {
-                    "text": "Слон",
+                    "text": langtable[lang_code]["bishop"],
                     "data": ["MOVE", move.copy(new_piece="b").pgn_encode()],
                 },
                 {
-                    "text": "Ладья",
+                    "text": langtable[lang_code]["rook"],
                     "data": ["MOVE", move.copy(new_piece="r").pgn_encode()],
                 },
             ]
             new_text = self.init_msg_text.split("\n")
-            new_text[
-                -1
-            ] = f"Ходит {self.db.get_name(player)}; выберите фигуру, в которую првератится пешка:"
+            new_text[-1] = "; ".join(
+                [
+                    langtable[lang_code]["opponent-to-move"].format(
+                        name=self.db.get_name(player)
+                    ),
+                    langtable[lang_code]["player-to-promote"],
+                ]
+            )
 
             self.msg = self.msg.edit_media(
                 media=InputMediaPhoto(
                     media.board_image(
+                        lang_code,
                         self.states,
                         selected=args[1],
                         possible_moves=[move],
@@ -479,7 +579,7 @@ class GroupMatch(BaseMatch):
             )
 
         elif args[0] == "MOVE":
-            self.init_turn(move=core.Move.from_pgn(args[1], self.states[-1]))
+            self.init_turn(lang_code, move=core.Move.from_pgn(args[1], self.states[-1]))
 
 
 class PMMatch(BaseMatch):
@@ -520,9 +620,6 @@ class PMMatch(BaseMatch):
             Chat(obj["chat_id2"], "private", bot=bot),
             bot=bot,
         )
-        new.turn += 1
-        new.empty_halfturns += 1
-        new.is_white_turn = not new.is_white_turn
 
         return new
 
@@ -588,33 +685,9 @@ class PMMatch(BaseMatch):
         )
         return res
 
-    def _send_analysis_video(self, text: str):
-        analyser = analysis.ChessEngine(BaseMatch.ENGINE_FILENAME)
-        video, thumb = media.board_video(self, analyser=analyser)
-        new_msg = InputMediaVideo(
-            video, caption=text, filename=self.video_filename, thumb=thumb
-        )
-        self.db.set(f"{self.id}:pgn", gzip.compress(self.pgn_encode().encode()), ex=3600*48)
-
-        self.player_msg = self.player_msg.edit_media(
-            media=new_msg,
-            reply_markup=self._keyboard(
-                [{"text": "Скачать партию", "data": ["DOWNLOAD", self.id]}],
-                expected_uid=self.players[0].id,
-                handler_id="MAIN"
-            )
-        )
-        if self.opponent_msg:
-            self.opponent_msg = self.opponent_msg.edit_media(
-                media=new_msg,
-                reply_markup=self._keyboard(
-                    [{"text": "Скачать партию", "data": ["DOWNLOAD", self.id]}],
-                    expected_uid=self.players[1].id,
-                    handler_id="MAIN"
-                )
-            )
-
-    def init_turn(self, move: core.Move = None, call_parent_method: bool = True):
+    def init_turn(
+        self, lang_code: str, move: core.Move = None, call_parent_method: bool = True
+    ):
         if call_parent_method:
             super().init_turn(move=move)
         player, opponent = self.players
@@ -625,77 +698,34 @@ class PMMatch(BaseMatch):
         elif state == "checkmate":
             self.result = "0-1" if self.states[-1].is_white_turn else "1-0"
 
-        if state == "checkmate":
-            player_text = opponent_text = f"""
-Игра окончена: шах и мат!
-Победитель: {self.db.get_name(opponent)}
-Ходов: {self.states[-1].turn - 1}.
-            """
-        elif state == "50-move-draw":
-            player_text = opponent_text = f"""
-Игра окончена: за последние 50 ходов не было убито ни одной фигуры и не сдвинуто ни одной пешки.
-Ничья!
-Ходов: {self.states[-1].turn - 1}
-            """
-        elif state == "3fold-repetition-draw":
-            player_text = opponent_text = f"""
-Игра окончена: одинаковая позиция доски возникла 3-ий раз подряд.
-Ничья!
-Ходов: {self.states[-1].turn - 1}
-            """
-        elif state == "stalemate-draw":
-            player_text = opponent_text = f"""
-Игра окончена: у {"белых" if self.states[-1].is_white_turn else "черных"} не осталось ходов, но их король не под шахом.
-Ничья!
-Ходов: {self.states[-1].turn - 1}
-            """
+        if self.result != "*":
+            self.send_analysis_video(lang_code, state)
         else:
-            player_text = f"Ход {self.states[-1].turn}"
-            if move:
-                player_text += f"\n{move.piece.name}{' -> '+move.new_piece.name if move.is_promotion else ''}"
-                player_text += f": {encode_pos(move.src)} -> {encode_pos(move.dst)}"
-                if move.is_castling:
-                    player_text += f' ({"Короткая" if  move.rook_src.column == 7 else "Длинная"} рокировка)'
-                if move.is_capturing:
-                    player_text += f"\n{move.killed.name} на {encode_pos(move.dst)} игрока {self.db.get_name(player)} убит"
-                    player_text += (
-                        f"{'а' if move.killed.name in ['Пешка', 'Ладья'] else ''}!"
-                    )
-                else:
-                    player_text += "\n"
-            else:
-                player_text += "\n\n"
+            player_msg = opponent_msg = langtable[lang_code]["curr-move"].format(
+                n=self.states[-1].turn
+            )
 
             if state == "check":
-                player_text += f"\nИгроку {self.db.get_name(player)} поставлен шах!"
+                player_msg += langtable[lang_code]["player-in-check"].format()
+                opponent_msg += langtable[lang_code]["player-in-check"].format(
+                    name=self.db.get_name(player)
+                )
             else:
-                player_text += "\n"
+                player_msg = opponent_msg = player_msg + "\n"
 
-            opponent_text = player_text
-
-            player_text += "\nВыберите действие:"
-            opponent_text += f"\nХодит {self.db.get_name(player)}"
-
-        if self.result != "*":
-            eval_thread = threading.Thread(target=self._send_analysis_video, args=(player_text,))
-            eval_thread.start()
-            last_boardimg = InputMediaPhoto(media.board_image(
-                    self.states,
-                    player1_name=self.db.get_name(self.player1),
-                    player2_name=self.db.get_name(self.player2),
-                ),
-                caption="Игра окончена, проводится анализ партии, пожалуйста подождите...",
-                filename=self.image_filename,
+            opponent_msg += langtable[lang_code]["opponent-to-move"].format(
+                name=self.db.get_name(player)
             )
-            self.player_msg = self.player_msg.edit_media(last_boardimg)
-            if self.opponent_msg:
-                self.player_msg = self.player_msg.edit_media(last_boardimg)
-        else:
-            self.init_msg_text = player_text
+            player_msg += langtable[lang_code]["player-to-move"]
+
+            self.init_msg_text = player_msg
             keyboard = self._keyboard(
                 [
-                    {"text": "Ходить", "data": ["TURN"]},
-                    {"text": "Сдаться", "data": ["SURRENDER"]},
+                    {"text": langtable[lang_code]["move-button"], "data": ["TURN"]},
+                    {
+                        "text": langtable[lang_code]["resign-button"],
+                        "data": ["SURRENDER"],
+                    },
                 ],
                 player.id,
             )
@@ -703,11 +733,12 @@ class PMMatch(BaseMatch):
                 self.player_msg = self.player_msg.edit_media(
                     media=InputMediaPhoto(
                         media.board_image(
+                            lang_code,
                             self.states,
                             player1_name=self.db.get_name(self.player1),
                             player2_name=self.db.get_name(self.player2),
                         ),
-                        caption=player_text,
+                        caption=player_msg,
                         filename=self.image_filename,
                     ),
                     reply_markup=keyboard,
@@ -717,11 +748,12 @@ class PMMatch(BaseMatch):
                     self.bot.send_photo(
                         player_chatid,
                         media.board_image(
+                            lang_code,
                             self.states,
                             player1_name=self.db.get_name(self.player1),
                             player2_name=self.db.get_name(self.player2),
                         ),
-                        caption=player_text,
+                        caption=player_msg,
                         filename=self.image_filename,
                         reply_markup=keyboard,
                     )
@@ -729,32 +761,33 @@ class PMMatch(BaseMatch):
                     else None
                 )
 
-            if opponent_chatid:
-                if self.opponent_msg:
-                    self.opponent_msg = self.opponent_msg.edit_media(
-                        media=InputMediaPhoto(
-                            media.board_image(
-                                self.states,
-                                player1_name=self.db.get_name(self.player1),
-                                player2_name=self.db.get_name(self.player2),
-                            ),
-                            caption=opponent_text,
-                            filename=self.image_filename,
-                        )
-                    )
-                else:
-                    self.opponent_msg = self.bot.send_photo(
-                        opponent_chatid,
+            if self.opponent_msg:
+                self.opponent_msg = self.opponent_msg.edit_media(
+                    media=InputMediaPhoto(
                         media.board_image(
+                            lang_code,
                             self.states,
                             player1_name=self.db.get_name(self.player1),
                             player2_name=self.db.get_name(self.player2),
                         ),
-                        caption=opponent_text,
+                        caption=opponent_msg,
                         filename=self.image_filename,
                     )
+                )
+            elif opponent_chatid:
+                self.opponent_msg = self.bot.send_photo(
+                    opponent_chatid,
+                    media.board_image(
+                        lang_code,
+                        self.states,
+                        player1_name=self.db.get_name(self.player1),
+                        player2_name=self.db.get_name(self.player2),
+                    ),
+                    caption=opponent_msg,
+                    filename=self.image_filename,
+                )
 
-    def handle_input(self, args):
+    def handle_input(self, lang_code: str, args: List):
         player, opponent = self.players
         allies, _ = self.pieces
 
@@ -762,6 +795,7 @@ class PMMatch(BaseMatch):
             self.player_msg = self.player_msg.edit_media(
                 media=InputMediaPhoto(
                     media.board_image(
+                        lang_code,
                         self.states,
                         player1_name=self.db.get_name(self.player1),
                         player2_name=self.db.get_name(self.player2),
@@ -771,30 +805,41 @@ class PMMatch(BaseMatch):
                 ),
                 reply_markup=self._keyboard(
                     [
-                        {"text": "Ходить", "data": ["TURN"]},
-                        {"text": "Сдаться", "data": ["SURRENDER"]},
+                        {"text": langtable[lang_code]["move-button"], "data": ["TURN"]},
+                        {
+                            "text": langtable[lang_code]["resign-button"],
+                            "data": ["SURRENDER"],
+                        },
                     ],
                     player.id,
                 ),
             )
 
         if args[0] == "TURN":
-            piece_buttons = [{"text": "Назад", "data": ["INIT_MSG"]}]
+            piece_buttons = [
+                {"text": langtable[lang_code]["back-button"], "data": ["INIT_MSG"]}
+            ]
             for piece in allies:
-                if next(
-                    filter(lambda x: x.is_legal(), piece.get_moves()),
-                    None,
-                ):
+                if piece.get_moves():
                     piece_buttons.append(
-                        {"text": str(piece), "data": ["CHOOSE_PIECE", piece.pos]}
+                        {
+                            "text": langtable[lang_code]["piece-desc"].format(
+                                piece=langtable[lang_code][
+                                    type(piece).__name__.lower()
+                                ],
+                                pos=encode_pos(piece.pos),
+                            ),
+                            "data": ["CHOOSE_PIECE", piece.pos],
+                        }
                     )
 
             new_text = self.init_msg_text.split("\n")
-            new_text[-1] = f"Выберите фигуру:"
+            new_text[-1] = langtable[lang_code]["player-to-choose-piece"]
 
             self.player_msg = self.player_msg.edit_media(
                 media=InputMediaPhoto(
                     media.board_image(
+                        lang_code,
                         self.states,
                         player1_name=self.db.get_name(self.player1),
                         player2_name=self.db.get_name(self.player2),
@@ -807,29 +852,14 @@ class PMMatch(BaseMatch):
 
         elif args[0] == "SURRENDER":
             self.result = "0-1" if self.states[-1].is_white_turn else "1-0"
-            text=f"""
-Игра окончена: {self.db.get_name(player)} сдался.
-Победитель: {self.db.get_name(opponent)}.
-Ходов: {self.states[-1].turn - 1}."""
-            eval_thread = threading.Thread(target=self._send_analysis_video, args=(text,))
-            eval_thread.start()
-            last_boardimg = InputMediaPhoto(media.board_image(
-                    self.states,
-                    player1_name=self.db.get_name(self.player1),
-                    player2_name=self.db.get_name(self.player2),
-                ),
-                caption="Игра окончена, проводится анализ партии, пожалуйста подождите...",
-                filename=self.image_filename,
-            )
-            self.player_msg = self.player_msg.edit_media(last_boardimg)
-            if self.opponent_msg:
-                self.player_msg = self.player_msg.edit_media(last_boardimg)
+            self.send_analysis_video(lang_code, "resignation")
 
         elif args[0] == "CHOOSE_PIECE":
             args[1] = decode_pos(args[1])
-            dest_buttons = [{"text": "Назад", "data": ["TURN"]}]
-            piece = self.states[-1][args[1]]
-            moves = list(filter(lambda x: x.is_legal(), piece.get_moves()))
+            dest_buttons = [
+                {"text": langtable[lang_code]["back-button"], "data": ["TURN"]}
+            ]
+            moves = self.states[-1][args[1]].get_moves()
             for move in moves:
                 if move.is_promotion:
                     dest_buttons.append(
@@ -847,11 +877,12 @@ class PMMatch(BaseMatch):
                     )
 
             new_text = self.init_msg_text.split("\n")
-            new_text[-1] = f"Выберите новое место фигуры:"
+            new_text[-1] = langtable[lang_code]["player-to-choose-dest"]
 
             self.player_msg = self.player_msg.edit_media(
                 media=InputMediaPhoto(
                     media.board_image(
+                        lang_code,
                         self.states,
                         selected=args[1],
                         possible_moves=moves,
@@ -867,29 +898,35 @@ class PMMatch(BaseMatch):
         elif args[0] == "PROMOTION_MENU":
             args[1] = decode_pos(args[1])
             args[2] = decode_pos(args[2])
-            move = core.Move.from_piece(self.states[-1][args[1]], args[2], new_piece="q")
+            move = core.Move.from_piece(
+                self.states[-1][args[1]], args[2], new_piece="q"
+            )
             pieces = [
-                {"text": "Ферзь", "data": ["MOVE", move.pgn_encode()]},
                 {
-                    "text": "Конь",
+                    "text": langtable[lang_code]["queen"],
+                    "data": ["MOVE", move.pgn_encode()],
+                },
+                {
+                    "text": langtable[lang_code]["knight"],
                     "data": ["MOVE", move.copy(new_piece="n").pgn_encode()],
                 },
                 {
-                    "text": "Слон",
+                    "text": langtable[lang_code]["bishop"],
                     "data": ["MOVE", move.copy(new_piece="b").pgn_encode()],
                 },
                 {
-                    "text": "Ладья",
+                    "text": langtable[lang_code]["rook"],
                     "data": ["MOVE", move.copy(new_piece="r").pgn_encode()],
                 },
             ]
 
             new_text = self.init_msg_text.split("\n")
-            new_text[-1] = f"Выберите фигуру, в которую првератится пешка:"
+            new_text[-1] = langtable[lang_code]["player-to-promote"]
 
             self.player_msg = self.player_msg.edit_media(
                 media=InputMediaPhoto(
                     media.board_image(
+                        lang_code,
                         self.states,
                         selected=args[1],
                         possible_moves=[move],
@@ -903,7 +940,9 @@ class PMMatch(BaseMatch):
             )
 
         elif args[0] == "MOVE":
-            return self.init_turn(move=core.Move.from_pgn(args[1], self.states[-1]))
+            return self.init_turn(
+                lang_code, move=core.Move.from_pgn(args[1], self.states[-1])
+            )
 
 
 class AIMatch(PMMatch):
@@ -945,32 +984,46 @@ class AIMatch(PMMatch):
         res.update({"diff": self.difficulty, "type": "AI"})
         return res
 
-    def init_turn(self, setup: bool = False, **kwargs) -> None:
+    def init_turn(self, lang_code: str, setup: bool = False, **kwargs) -> None:
         if setup:
             self.msg1 = self.bot.send_photo(
                 self.chat_id1,
-                media.board_image(self.states),
-                caption="Выберите уровень сложности:",
+                media.board_image(lang_code, self.states),
+                caption=langtable[lang_code]["choose-diff"],
                 filename=self.image_filename,
                 reply_markup=self._keyboard(
                     [
-                        {"text": "Низкий", "data": ["SKILL_LEVEL", 1]},
-                        {"text": "Средний", "data": ["SKILL_LEVEL", 2]},
-                        {"text": "Высокий", "data": ["SKILL_LEVEL", 3]},
-                        {"text": "Неограниченный", "data": ["SKILL_LEVEL", 4]},
+                        {
+                            "text": langtable[lang_code]["low-diff"],
+                            "data": ["SKILL_LEVEL", 1],
+                        },
+                        {
+                            "text": langtable[lang_code]["mid-diff"],
+                            "data": ["SKILL_LEVEL", 2],
+                        },
+                        {
+                            "text": langtable[lang_code]["high-diff"],
+                            "data": ["SKILL_LEVEL", 3],
+                        },
+                        {
+                            "text": langtable[lang_code]["max-diff"],
+                            "data": ["SKILL_LEVEL", 4],
+                        },
                     ],
                     self.player1.id,
                 ),
             )
 
         else:
-            super().init_turn(**kwargs)
-            return super().init_turn(self.engine.get_move(self.states[-1], self.EVAL_DEPTH))
+            super().init_turn(lang_code, **kwargs)
+            return super().init_turn(
+                lang_code, self.engine.get_move(self.states[-1], self.EVAL_DEPTH)
+            )
 
-    def handle_input(self, args):
+    def handle_input(self, lang_code, args):
         if args[0] == "SKILL_LEVEL":
             self.difficulty = args[1]
             self.engine.set_move_probabilities(getattr(self, f"PRESET_{args[1]}"))
-            return super().init_turn()
+            return super().init_turn(lang_code)
         else:
-            return super().handle_input(args)
+            return super().handle_input(lang_code, args)
