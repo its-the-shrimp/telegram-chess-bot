@@ -1,27 +1,41 @@
+from typing import Generator
 import redis
 from telegram.ext import DictPersistence, CallbackContext
 import logging
 import sys
 import json
 import gzip
+from telegram import User
 
 
 class RedisInterface(redis.Redis):
-    def is_anon(self, user) -> bool:
+    def is_anon(self, user: User) -> bool:
         return bool(self.exists(f"user-{user.id}:isanon"))
 
-    def get_name(self, user) -> str:
+    def get_name(self, user: User) -> str:
         if self.is_anon(user):
             return f"player{user.id}"
         else:
             return user.name
 
-    def anon_mode_off(self, user) -> None:
+    def anon_mode_off(self, user: User) -> None:
         self.delete(f"user-{user.id}:isanon")
 
-    def anon_mode_on(self, user) -> None:
+    def anon_mode_on(self, user: User) -> None:
         self.set(f"user-{user.id}:isanon", b"1")
 
+    def get_langcode(self, user_id: int) -> str:
+        key = f"{user_id}:lang"
+        return (self.get(key) or b"en").decode()
+
+    def cache_user_data(self, user: User) -> None:
+        self.set(f"{user.id}:lang", user.language_code.encode())
+
+    def get_user_ids(self) -> Generator:
+        for key in self.scan_iter(match="*:lang"):
+            key = key.decode()
+            yield int(key[:key.find(":")])
+        
 
 class RedisPersistence(DictPersistence):
     USER_DATA = "ptb:{token}:user-data"
@@ -127,7 +141,7 @@ class RedisContext(CallbackContext):
         self.langtable: dict[str, str] = {}
 
     @property
-    def db(self):
+    def db(self) -> RedisInterface:
         return self.dispatcher.persistence.conn
 
 
@@ -144,8 +158,11 @@ if __name__ == "__main__":
         for key in conn.scan_iter():
             key = key.decode()
             if conn.type(key) == b"string":
-                res[key] = gzip.decompress(conn.get(key)).decode()
-                res[key] = json.loads(res[key]) if res[key] else res[key]
+                try:
+                    res[key] = gzip.decompress(conn.get(key)).decode()
+                    res[key] = json.loads(res[key]) if res[key] else res[key]
+                except:
+                    res[key] = conn.get(key).decode()
             elif conn.type(key) == b"set":
                 res[key] = [i.decode() for i in conn.sscan_iter(key)]
 

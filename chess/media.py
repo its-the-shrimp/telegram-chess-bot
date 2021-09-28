@@ -7,7 +7,7 @@ import numpy
 import os
 import colorsys
 from .core import get_pgn_moveseq, get_moves, BoardInfo, Move
-from .utils import BoardPoint, ENGINE_FILENAME
+from .utils import *
 from .analysis import eval_pieces_defense, ChessEngine
 
 
@@ -29,7 +29,7 @@ EVALUATION_COLORS = {
     "□": "#9c9c9c",
 }
 MOVE_EVAL_DESC = {
-    k: v["chess"]["move-eval-desc"] for k, v in json.load(open("langtable.json")).items()
+    k: v["move-eval-desc"] for k, v in langtable.items()
 }
 
 LARGE_FONT = ImageFont.truetype("Arial-unicode.ttf", 24)

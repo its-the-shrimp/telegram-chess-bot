@@ -1,6 +1,5 @@
 import gzip
 import itertools
-import json
 import random
 from telegram import (
     InlineKeyboardMarkup,
@@ -22,7 +21,6 @@ from typing import Any, List, Union, Optional
 IDSAMPLE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-+"
 MOVETYPE_MARKERS = {"normal": "", "killing": "❌", "castling": "🔀", "promotion": "⏫"}
 JSON = dict[str, Union[str, dict]]
-langtable = {k: v["chess"] for k, v in json.load(open("langtable.json")).items()}
 
 
 def _group_items(obj: list[Any], n: int, head_item: bool = False) -> list[list[Any]]:
@@ -39,42 +37,27 @@ def _group_items(obj: list[Any], n: int, head_item: bool = False) -> list[list[A
     return res
 
 
-def decode_pgn_moveseq(
-    src: str, startpos: core.BoardInfo = core.BoardInfo.from_fen(STARTPOS)
-) -> list[core.BoardInfo]:
-    states = [startpos]
-    *moves, result = src.replace("\n", " ").split()
-    for token in moves:
-        if not (token[:-1].isdigit() and token[-1] == "."):
-            states.append(states[-1] + core.Move.from_pgn(token, states[-1]))
-
-    return states, result
-
-
 def from_dict(obj: dict[str, Any], match_id: str, bot: Bot) -> "BaseMatch":
     cls = eval(obj["type"] + "Match")
     return cls.from_dict(obj, match_id, bot)
-
-
-def decode_pgn_seq(pgn: str) -> list[core.BoardInfo]:
-    pass
 
 
 class BaseMatch:
     ENGINE_FILENAME = "./stockfish_14_x64"
     db = None
 
-    def __init__(self, bot=None, id=None):
+    def __init__(self, bot=None, id=None, options: dict[str, str] = {}):
         self.init_msg_text: Optional[str] = None
-        self.last_move: Optional[core.Move] = None
+        self.is_chess960: bool = options["ruleset"] == "chess960"
+        self.options = options
         self.bot: Bot = bot
         self.states: list[core.BoardInfo] = [core.BoardInfo.from_fen(STARTPOS)]
         self.result = "*"
         self.id: str = (
             id if id else "".join([random.choice(IDSAMPLE) for i in range(8)])
         )
-        self.image_filename: str = f"chess-{self.id}.jpg"
-        self.video_filename: str = f"chess-{self.id}.mp4"
+        self.image_filename: str = f"chess4u-{self.id}.jpg"
+        self.video_filename: str = f"chess4u-{self.id}.mp4"
 
     def _keyboard(
         self,
@@ -109,6 +92,7 @@ class BaseMatch:
         return {
             "type": "Base",
             "moves": core.get_pgn_moveseq(core.get_moves(self.states)),
+            "options": self.options,
         }
 
     @property
@@ -292,12 +276,12 @@ class BaseMatch:
             if self.player_msg:
                 self.player_msg = self.player_msg.edit_media(last_boardimg)
             if self.opponent_msg:
-                self.player_msg = self.player_msg.edit_media(last_boardimg)
+                self.opponent_msg = self.opponent_msg.edit_media(last_boardimg)
 
     def init_turn(self, move: core.Move = None) -> None:
+        logging.debug("Move made: " + (move.pgn_encode() if move else ""))
         if move:
             self.states.append(self.states[-1] + move)
-        self.last_move = move
 
 
 class GroupMatch(BaseMatch):
@@ -320,7 +304,7 @@ class GroupMatch(BaseMatch):
             bot=bot,
             id=match_id,
         )
-        new.states, new.result = decode_pgn_moveseq(obj["moves"])
+        new.states, new.result = core.decode_pgn_moveseq(obj["moves"])
         new.init_msg_text = obj["msg_text"]
         new.msg = Message(
             obj["msg_id"],
@@ -426,6 +410,7 @@ class GroupMatch(BaseMatch):
     def handle_input(self, lang_code: str, args: list[Union[str, int]]) -> None:
         player, opponent = self.players
         allies, _ = self.pieces
+
         if args[0] == "INIT_MSG":
             self.msg = self.msg.edit_caption(
                 self.init_msg_text,
@@ -490,7 +475,7 @@ class GroupMatch(BaseMatch):
             ]
             moves = self.states[-1][args[1]].get_moves()
             for move in moves:
-                if move.is_promotion:
+                if move.is_promotion():
                     dest_buttons.append(
                         {
                             "text": MOVETYPE_MARKERS[move.type] + encode_pos(move.dst),
@@ -605,7 +590,7 @@ class PMMatch(BaseMatch):
             bot=bot,
             id=match_id,
         )
-        new.states, new.result = decode_pgn_moveseq(obj["moves"])
+        new.states, new.result = core.decode_pgn_moveseq(obj["moves"])
         new.init_msg_text = obj["msg_text"]
         new.msg1 = Message(
             obj["msg_id1"],
@@ -790,7 +775,6 @@ class PMMatch(BaseMatch):
     def handle_input(self, lang_code: str, args: List):
         player, opponent = self.players
         allies, _ = self.pieces
-
         if args[0] == "INIT_MSG":
             self.player_msg = self.player_msg.edit_media(
                 media=InputMediaPhoto(
@@ -861,7 +845,7 @@ class PMMatch(BaseMatch):
             ]
             moves = self.states[-1][args[1]].get_moves()
             for move in moves:
-                if move.is_promotion:
+                if move.is_promotion():
                     dest_buttons.append(
                         {
                             "text": MOVETYPE_MARKERS[move.type] + encode_pos(move.dst),
@@ -946,26 +930,34 @@ class PMMatch(BaseMatch):
 
 
 class AIMatch(PMMatch):
-    PRESET_1 = (0, 1, 1, 2, 2, 2, 2)
-    PRESET_2 = (0, 1, 1, 2, 2)
-    PRESET_3 = (0, 1, 2)
-    PRESET_4 = (0,)
+    DIFF_PRESETS = {
+        "low-diff": (0, 1, 1, 2, 2, 2, 2),
+        "mid-diff": (0, 1, 1, 2, 2),
+        "high-diff": (0, 1, 2),
+        "max-diff": (0,),
+    }
     EVAL_DEPTH = 18
 
-    def __init__(self, player: User, chat_id: int, player2: User = None, **kwargs):
-        ai_player = player2 if player2 else kwargs["bot"].get_me()
-        self.ai_rating: int = None
-        super().__init__(player, ai_player, chat_id, 0, **kwargs)
+    def __init__(
+        self, player: User, chat_id: int, options: dict[str, str] = {}, **kwargs
+    ):
+        super().__init__(
+            player, kwargs["bot"].get_me(), chat_id, 0, options=options, **kwargs
+        )
         self.engine = analysis.ChessEngine(self.ENGINE_FILENAME)
+        self.difficulty = options["difficulty"]
+
+        self.engine.set_move_probabilities(self.DIFF_PRESETS[self.difficulty])
+        self.engine["UCI_Chess960"] = self.is_chess960
 
     @classmethod
     def from_dict(cls, obj: JSON, match_id: int, bot=Bot) -> "AIMatch":
         logging.debug(f"Constructing {cls.__name__} object: {obj}")
         player = User.de_json(obj["player1"] | {"is_bot": False}, bot)
-        new = cls(player, obj["chat_id1"], bot=bot, id=match_id)
-        new.states, new.result = decode_pgn_moveseq(obj["moves"])
+        new = cls(player, obj["chat_id1"], bot=bot, id=match_id, options=obj["options"])
+        new.states, new.result = core.decode_pgn_moveseq(obj["moves"])
         new.init_msg_text = obj["msg_text"]
-        new.engine.set_move_probabilities(getattr(new, f"PRESET_{obj['diff']}"))
+        new.engine.set_move_probabilities()
         new.msg1 = Message(
             obj["msg_id1"],
             datetime.datetime.now().timestamp(),
@@ -978,52 +970,13 @@ class AIMatch(PMMatch):
 
     def to_dict(self) -> JSON:
         res = super().to_dict()
-        del res["player2"]
-        del res["msg_id2"]
-        del res["chat_id2"]
-        res.update({"diff": self.difficulty, "type": "AI"})
+        del res["player2"], res["msg_id2"], res["chat_id2"]
+        res["type"] = "AI"
         return res
 
-    def init_turn(self, lang_code: str, setup: bool = False, **kwargs) -> None:
-        if setup:
-            self.msg1 = self.bot.send_photo(
-                self.chat_id1,
-                media.board_image(lang_code, self.states),
-                caption=langtable[lang_code]["choose-diff"],
-                filename=self.image_filename,
-                reply_markup=self._keyboard(
-                    [
-                        {
-                            "text": langtable[lang_code]["low-diff"],
-                            "data": ["SKILL_LEVEL", 1],
-                        },
-                        {
-                            "text": langtable[lang_code]["mid-diff"],
-                            "data": ["SKILL_LEVEL", 2],
-                        },
-                        {
-                            "text": langtable[lang_code]["high-diff"],
-                            "data": ["SKILL_LEVEL", 3],
-                        },
-                        {
-                            "text": langtable[lang_code]["max-diff"],
-                            "data": ["SKILL_LEVEL", 4],
-                        },
-                    ],
-                    self.player1.id,
-                ),
-            )
-
-        else:
-            super().init_turn(lang_code, **kwargs)
+    def init_turn(self, lang_code: str, move: core.Move = None, **kwargs) -> None:
+        super().init_turn(lang_code, move=move, **kwargs)
+        if move:
             return super().init_turn(
                 lang_code, self.engine.get_move(self.states[-1], self.EVAL_DEPTH)
             )
-
-    def handle_input(self, lang_code, args):
-        if args[0] == "SKILL_LEVEL":
-            self.difficulty = args[1]
-            self.engine.set_move_probabilities(getattr(self, f"PRESET_{args[1]}"))
-            return super().init_turn(lang_code)
-        else:
-            return super().handle_input(lang_code, args)
