@@ -1,8 +1,7 @@
-import json
 import math
 from typing import Union
 import cv2
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont
 import numpy
 import os
 import colorsys
@@ -36,7 +35,7 @@ LARGE_FONT = ImageFont.truetype("Arial-unicode.ttf", 24)
 SMALL_FONT = LARGE_FONT.font_variant(size=20)
 
 
-BOARD = Image.open("images/chess/board.png")
+BOARD = Image.open("images/static/board.png")
 BOARD_OFFSET = (16, 100)
 TILE_SIZE = 60
 
@@ -44,7 +43,7 @@ PIECES = {}
 THUMBS = {}
 for name in ["Pawn", "King", "Bishop", "Rook", "Queen", "Knight"]:
     PIECES[name] = [
-        Image.open(f"images/chess/{color}_{name.lower()}.png")
+        Image.open(f"images/static/{color}_{name.lower()}.png")
         for color in ["black", "white"]
     ]
     THUMBS[name] = [piece_img.resize((24, 24)) for piece_img in PIECES[name]]
@@ -275,11 +274,11 @@ def _board_image_with_static_analysis(boards: list[BoardInfo], **kwargs):
     return _board_image(boards, custom_bg_pic=board_img, **kwargs)
 
 
-def board_image(*args, **kwargs):
+def board_image(*args, **kwargs) -> bytes:
     return cv2.imencode(".jpg", _board_image(*args, **kwargs))[1].tobytes()
 
 
-def board_image_with_static_analysis(*args, **kwargs):
+def board_image_with_static_analysis(*args, **kwargs) -> bytes:
     return cv2.imencode(".jpg", _board_image_with_static_analysis(*args, **kwargs))[
         1
     ].tobytes()

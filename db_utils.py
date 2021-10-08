@@ -1,32 +1,47 @@
-from typing import Generator
+from typing import Generator, Optional
 import redis
+from telegram import Bot, User
 from telegram.ext import DictPersistence, CallbackContext
 import logging
 import sys
 import json
 import gzip
-from telegram import User
 
 
 class RedisInterface(redis.Redis):
-    def is_anon(self, user: User) -> bool:
-        return bool(self.exists(f"user-{user.id}:isanon"))
-
     def get_name(self, user: User) -> str:
-        if self.is_anon(user):
+        if self.get_anon_mode(user):
             return f"player{user.id}"
         else:
             return user.name
 
-    def anon_mode_off(self, user: User) -> None:
-        self.delete(f"user-{user.id}:isanon")
+    def create_invite(self, invite_id: str, user: User, options: dict):
+        self.set(
+            f"invite:{invite_id}",
+            gzip.compress(
+                json.dumps({"from_user": user.to_dict(), "options": options}).encode()
+            ),
+        )
 
-    def anon_mode_on(self, user: User) -> None:
-        self.set(f"user-{user.id}:isanon", b"1")
+    def get_invite(self, invite_id: str) -> Optional[dict]:
+        raw = self.get(f"invite:{invite_id}")
+        if raw:
+            self.delete(f"invite:{invite_id}")
+            res = json.loads(gzip.decompress(raw).decode())
+            res["from_user"] = User.de_json(res["from_user"], self.bot)
+            return res
 
-    def get_langcode(self, user_id: int) -> str:
-        key = f"{user_id}:lang"
-        return (self.get(key) or b"en").decode()
+    def get_anon_mode(self, user: User) -> bool:
+        return bool(self.exists(f"{user.id}:isanon"))
+
+    def set_anon_mode(self, user: User, value: bool) -> None:
+        if value:
+            self.set(f"{user.id}:isanon", b"1")
+        else:
+            self.delete(f"{user.id}:isanon")
+
+    def get_langcode(self, user: User) -> str:
+        return (self.get(f"{user.id}:lang") or b"en").decode()
 
     def cache_user_data(self, user: User) -> None:
         self.set(f"{user.id}:lang", user.language_code.encode())
@@ -34,8 +49,8 @@ class RedisInterface(redis.Redis):
     def get_user_ids(self) -> Generator:
         for key in self.scan_iter(match="*:lang"):
             key = key.decode()
-            yield int(key[:key.find(":")])
-        
+            yield int(key[: key.find(":")])
+
 
 class RedisPersistence(DictPersistence):
     USER_DATA = "ptb:{token}:user-data"
@@ -43,6 +58,10 @@ class RedisPersistence(DictPersistence):
     BOT_DATA = "ptb:{token}:bot-data"
     CALLBACK_DATA = "ptb:{token}:callback-data"
     CONVERSATIONS = "ptb:{token}:conversations"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.bot: Bot = None
 
     @staticmethod
     def default_decoder(self, obj):
@@ -111,6 +130,7 @@ class RedisPersistence(DictPersistence):
             conversations_json=obj.get("conversations"),
         )
         super().set_bot(bot)
+        self.conn.bot = bot
         del self._init_kwargs
 
     def flush(self) -> None:

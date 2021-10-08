@@ -42,6 +42,10 @@ PGNSYMBOLS = {
 def decode_pgn_moveseq(src: str, startpos: "BoardInfo" = None) -> tuple[list["BoardInfo"], str]:
     states = [startpos if startpos else BoardInfo.from_fen(STARTPOS)]
     *moves, result = src.replace("\n", " ").split()
+    if result not in ["*", ".5-.5", "1/2-1/2", "0-1", "1-0"]:
+        moves.append(result)
+        result = "*"
+
     for token in moves:
         if not (token[:-1].isdigit() and token[-1] == "."):
             states.append(states[-1] + Move.from_pgn(token, states[-1]))

@@ -1,27 +1,46 @@
+import io
+import time
 import os
 import json
-from typing import Optional
+from typing import Callable, Optional
 import telegram as tg
 import chess as module
 import db_utils
 import difflib
 import gzip
 import logging
-import collections
+import re
+import traceback
+import flask
 
-if os.path.exists(os.path.join(os.path.dirname(__file__), "debug_env.json")):
+debug_env_path = os.path.join(os.path.dirname(__file__), "debug_env.json")
+INLINE_OPTION_PATTERN = re.compile(r"\w+:\d")
+IS_DEBUG = os.path.exists(debug_env_path)
+
+if IS_DEBUG:
     loglevel = logging.DEBUG
-    module.BaseMatch.ENGINE_FILENAME = "./stockfish"
-    with open(
-        os.path.join(os.path.join(os.path.dirname(__file__), "debug_env.json"))
-    ) as r:
+    with open(debug_env_path) as r:
         os.environ.update(json.load(r))
 else:
     loglevel = logging.INFO
 
-logging.basicConfig(
-    format="%(relativeCreated)s %(module)s %(message)s", level=logging.DEBUG
-)
+
+class ExtFormatter(logging.Formatter):
+    last_row_created: int = time.monotonic_ns()
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def format(self, record: logging.LogRecord) -> str:
+        cur_row_created = time.monotonic_ns()
+        record.interval = (cur_row_created - self.last_row_created) // 10**6
+        self.last_row_created = cur_row_created
+        return super().format(record)
+
+handler = logging.StreamHandler()
+handler.setFormatter(ExtFormatter("[{interval} ms] {levelname} {name}:\n\t{message}\n", style="{"))
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logger.addHandler(handler)
 
 try:
     os.mkdir(os.path.join(os.path.dirname(__file__), "images", "temp"))
@@ -33,81 +52,77 @@ group_thread = tg.ext.DelayQueue()
 pm_thread = tg.ext.DelayQueue()
 
 
-class QueuePoint:
-    def __init__(
-        self,
-        user: tg.User,
-        msg: tg.Message,
-        invite_msg: tg.Message = None,
-        options: dict[str, str] = {},
-    ):
-        self.user = user
-        self.chat_id = msg.chat_id
-        self.msg = msg
-        self.invite_msg = invite_msg
-        self.options = options
-        self.is_user_invite = invite_msg and self.chat_id != invite_msg.chat_id
-        self.is_chat_invite = invite_msg and self.chat_id == invite_msg.chat_id
-
-
-def get_opponent(
-    queue: list[QueuePoint],
-    user: tg.User,
-    chat_id: int,
-    options: dict = {},
-    created_by_uid: int = None,
-) -> Optional[QueuePoint]:
-    opponent, invite = (None, None)
-    for index in range(len(queue) - 1, -1, -1):
-        queuepoint = queue[index]
-        if all(
-            [
-                options == queuepoint.options,
-                chat_id == queuepoint.chat_id or not queuepoint.is_chat_invite,
-                not queuepoint.is_user_invite
-                or user.id == queuepoint.invite_msg.chat_id,
-                created_by_uid == queuepoint.user.id or created_by_uid is None,
-            ]
-        ):
-            if queuepoint.is_chat_invite or queuepoint.is_user_invite:
-                invite = index
+def stop_bot(_, frame):
+        updater = frame.f_locals["self"]
+        counter = {}
+        for key in updater.persistence.conn.keys(pattern="*:lang"):
+            key = updater.persistence.conn.get(key).decode()
+            if key:
+                counter[key] += 1
             else:
-                opponent = index
+                counter[key] = 1
 
-    if invite is not None:
-        return queue.pop(invite)
-    elif opponent is not None:
-        return queue.pop(opponent)
+        updater.bot.send_message(
+            text="\n".join([f"{k}: {v}" for k, v in counter.items()]),
+            chat_id=os.environ["CREATOR_ID"],
+        )
+        group_thread.stop()
+        pm_thread.stop()
+        exit()
 
 
-def avoid_spam(f):
+def get_opponent(queue: list[dict], options: dict) -> Optional[dict]:
+    for queuepoint in reversed(queue):
+        if options == queuepoint["options"]:
+            return queuepoint
+
+
+def avoid_spam(f: Callable) -> Callable:
     def decorated(update: tg.Update, context: db_utils.RedisContext):
-        context.db.cache_user_data(update.effective_user)
-        context.langtable = module.langtable[update.effective_user.language_code]
 
-        if update.effective_chat.type == "private":
-            pm_thread._queue.put((f, (update, context), {}))
+        if getattr(update.effective_chat, "type", tg.Chat.PRIVATE) in (
+            tg.Chat.PRIVATE,
+            tg.Chat.SENDER,
+        ):
+            pm_thread._queue.put((tg_adapter(f), (update, context), {}))
         else:
-            group_thread._queue.put((f, (update, context), {}))
+            group_thread._queue.put((tg_adapter(f), (update, context), {}))
 
     return decorated
 
 
-def stop_bot(_, frame):
-    updater = frame.f_locals["self"]
-    counter = collections.defaultdict(int)
-    for key in updater.persistence.conn.keys(pattern="*:lang"):
-        counter[updater.persistence.conn.get(key).decode()] += 1
-    updater.bot.send_message(
-        text="\n".join([f"{k}: {v}" for k, v in counter.items()]),
-        chat_id=os.environ["CREATOR_ID"],
-    )
-    group_thread.stop()
-    pm_thread.stop()
-    exit()
+def tg_adapter(
+    f: Callable[[tg.Update, db_utils.RedisContext], None]
+) -> Callable[[tg.Update, db_utils.RedisContext], None]:
+    def decorated(update: tg.Update, context: db_utils.RedisContext):
+        context.db.cache_user_data(update.effective_user)
+        context.langtable = module.langtable[update.effective_user.language_code]
+
+        return f(update, context)
+
+    return decorated
 
 
-def decode_data(self, obj):
+def error_handler(update: tg.Update, context: db_utils.RedisContext):
+    try:
+        raise context.error
+    except Exception as err:
+        if type(err) == tg.error.Conflict:
+            context.bot.send_message(
+                chat_id=os.environ["CREATOR_ID"],
+                text="Ошибка: несколько программ подключены к одному боту",
+            )
+        else:
+            tb = traceback.format_exc(limit=10) + "\n\n\n" + str(update.to_dict())
+            tb = tb[max(0, len(tb) - tg.constants.MAX_MESSAGE_LENGTH) :]
+
+            context.bot.send_message(chat_id=os.environ["CREATOR_ID"], text=tb)
+
+        if IS_DEBUG:
+            raise err
+
+
+def decode_data(_, obj: dict) -> dict:
     return {k: gzip.decompress(v).decode() for k, v in obj.items()}
 
 
@@ -129,16 +144,29 @@ def parse_callbackquery_data(data: str) -> dict:
     return res
 
 
+def prettify_options(options: dict[str, int], lang_code: str) -> str:
+    langtable = module.langtable[lang_code]
+    res = langtable["options-title"] + "\n"
+    for k, v in options.items():
+        options_list = tuple(module.OPTIONS[k]["options"].keys())
+        res += langtable[options_list[v]] + ", "
+
+    return res.removeprefix(", ")
+
+
 def format_options(
-    user: tg.User, indexes: dict[str, int] = {}
+    user: tg.User, indexes: dict[str, int] = None
 ) -> tg.InlineKeyboardMarkup:
     res = []
+    if indexes is None:
+        indexes = {name: 0 for name in module.OPTIONS}
+
     for name, option in module.OPTIONS.items():
-        chosen = option["options"][indexes.get(name, 0)]
+        chosen = tuple(option["options"].keys())[indexes.get(name, 0)]
         conditions_passed = True
         for c_option, c_func in option["conditions"].items():
             if not c_func(
-                module.OPTIONS[c_option]["options"][indexes.get(c_option, 0)]
+                tuple(module.OPTIONS[c_option]["options"].keys())[indexes[c_option]]
             ):
                 conditions_passed = False
 
@@ -158,6 +186,11 @@ def format_options(
                 ]
             )
 
+    if indexes["mode"] == tuple(module.OPTIONS["mode"]["options"]).index("invite"):
+        inline_query = " ".join([f"{k}:{v}" for k, v in indexes.items() if k != "mode"])
+    else:
+        inline_query = None
+
     res.append(
         [
             tg.InlineKeyboardButton(
@@ -166,7 +199,8 @@ def format_options(
             ),
             tg.InlineKeyboardButton(
                 text=module.langtable[user.language_code]["play-button"],
-                callback_data=f"{user.id}\nMAIN\nPLAY",
+                switch_inline_query=inline_query,
+                callback_data=None if inline_query else f"{user.id}\nMAIN\nPLAY",
             ),
         ]
     )
@@ -179,6 +213,20 @@ def parse_options(keyboard: tg.InlineKeyboardMarkup) -> dict[str, int]:
     for column in keyboard.inline_keyboard[:-1]:
         column_data = parse_callbackquery_data(column[1].callback_data)["args"]
         res[column_data[1]] = column_data[2]
+
+    return res
+
+
+def get_options_list(indexes: dict[str, int], key: str) -> list[str]:
+    res = []
+    for option, conditions in module.OPTIONS[key]["options"].items():
+        res.append(option)
+        for c_option, c_func in conditions.items():
+            if not c_func(
+                tuple(module.OPTIONS[c_option]["options"])[indexes.get(c_option, 0)]
+            ):
+                del res[-1]
+                break
 
     return res
 
@@ -211,7 +259,7 @@ def unknown(update: tg.Update, context: db_utils.RedisContext):
 
 @avoid_spam
 def settings(update: tg.Update, context: db_utils.RedisContext):
-    is_anon = context.db.is_anon(update.effective_user)
+    is_anon = context.db.get_anon_mode(update.effective_user)
     update.effective_message.reply_text(
         context.langtable["settings-msg"],
         parse_mode=tg.ParseMode.HTML,
@@ -232,60 +280,75 @@ def settings(update: tg.Update, context: db_utils.RedisContext):
 
 @avoid_spam
 def boardgame_menu(update: tg.Update, context: db_utils.RedisContext) -> None:
-    context.user_data["pending_options"] = None
-    update.effective_message.reply_text(
+    update.effective_chat.send_message(
         context.langtable["game-setup"],
         reply_markup=format_options(update.effective_user),
     )
 
 
-@avoid_spam
-def spec_invite_with_contact(update: tg.Update, context: db_utils.RedisContext) -> None:
-    if "pending_options" in context.user_data:
-        opponent_langtable = module.langtable[
-            context.db.get_langcode(update.effective_message.contact.user_id)
-        ]
-        invite_msg = context.bot.send_message(
-            update.message.contact.user_id,
-            opponent_langtable["invite-msg"].format(
-                name=update.effective_user.name,
-                options=", ".join(
+@tg_adapter
+def send_invite_inline(update: tg.Update, context: db_utils.RedisContext) -> None:
+    raw = update.inline_query.query.strip(" ")
+    options = (
+        token.split(":")
+        for token in raw.split(" ")
+        if INLINE_OPTION_PATTERN.match(token)
+    )
+    options = {k: int(v) for k, v in options}
+    try:
+        challenge_desc = prettify_options(options, update.effective_user.language_code)
+    except LookupError:
+        return
+
+    match_id = module.create_match_id()
+
+    update.inline_query.answer(
+        results=(
+            tg.InlineQueryResultPhoto(
+                match_id,
+                module.INVITE_IMAGE,
+                module.INVITE_THUMBNAIL,
+                title=context.langtable["send-challenge"],
+                description=challenge_desc,
+                caption=context.langtable["invite-msg"].format(
+                    name=update.effective_user.name, options=challenge_desc
+                ),
+                reply_markup=tg.InlineKeyboardMarkup(
                     [
-                        opponent_langtable[v]
-                        for k, v in context.user_data["pending_options"].items()
-                        if k != "mode"
+                        [
+                            tg.InlineKeyboardButton(
+                                text=context.langtable["accept-button"],
+                                callback_data=f"\nMAIN\nACCEPT#{match_id}",
+                            )
+                        ]
                     ]
                 ),
             ),
-            reply_markup=tg.InlineKeyboardMarkup(
-                [
-                    [
-                        tg.InlineKeyboardButton(
-                            text=opponent_langtable["accept-button"],
-                            callback_data=f"{update.effective_message.contact.user_id}\nMAIN\nACCEPT#{update.effective_user.id}",
-                        ),
-                        tg.InlineKeyboardButton(
-                            text=opponent_langtable["decline-button"],
-                            callback_data=f"{update.effective_message.contact.user_id}\nMAIN\nDECLINE#{update.effective_user.id}",
-                        ),
-                    ],
-                ]
-            ),
         )
-        context.bot_data["queue"].append(
-            QueuePoint(
-                update.effective_user,
-                context.user_data["pending_req_msg"],
-                invite_msg=invite_msg,
-                options=context.user_data["pending_options"],
-            )
-        )
+    )
+
+
+@tg_adapter
+def create_invite(update: tg.Update, context: db_utils.RedisContext):
+    raw = update.chosen_inline_result.query.strip(" ")
+    options = (
+        token.split(":")
+        for token in raw.split(" ")
+        if INLINE_OPTION_PATTERN.match(token)
+    )
+    options = {k: int(v) for k, v in options}
+
+    context.db.create_invite(
+        update.chosen_inline_result.result_id, update.effective_user, options
+    )
 
 
 @avoid_spam
-def button_callback(update: tg.Update, context: db_utils.RedisContext):
+def button_callback(
+    update: tg.Update, context: db_utils.RedisContext
+) -> Optional[tuple]:
     args = parse_callbackquery_data(update.callback_query.data)
-    logging.debug(f"Handling user input: {args}")
+    logger.debug(f"Handling user input: {args}")
     if (
         args["expected_uid"]
         and args["expected_uid"] != update.callback_query.from_user.id
@@ -302,22 +365,8 @@ def button_callback(update: tg.Update, context: db_utils.RedisContext):
     if args["target_id"] == "MAIN":
         if args["args"][0] == "NA":
             update.callback_query.answer(text=context.langtable["error-popup-msg"])
-        elif args["args"][0] == "DOWNLOAD":
-            content = context.db.get(f"{args['args'][1]}:pgn")
-            update.effective_message.edit_reply_markup()
-            if content:
-                update.effective_message.reply_document(
-                    gzip.decompress(content),
-                    caption=context.langtable["pgn-file-caption"],
-                    filename=f"chess4u-{args['args'][1]}.pgn",
-                )
-                context.db.delete(f"{args['args'][1]}:pgn")
-            else:
-                update.callback_query.answer(
-                    context.langtable["pgn-fetch-error"], show_alert=True
-                )
         elif args["args"][0] == "ANON_MODE_OFF":
-            context.db.anon_mode_off(update.effective_user)
+            context.db.set_anon_mode(update.effective_user, False)
             update.callback_query.answer(
                 context.langtable["anonmode-off"], show_alert=True
             )
@@ -328,7 +377,7 @@ def button_callback(update: tg.Update, context: db_utils.RedisContext):
                             tg.InlineKeyboardButton(
                                 text=context.langtable["anonmode-button"].format(
                                     state="🟢"
-                                    if context.db.is_anon(update.effective_user)
+                                    if context.db.get_anon_mode(update.effective_user)
                                     else "🔴"
                                 ),
                                 callback_data=f"{update.effective_user.id}\nMAIN\nANON_MODE_ON",
@@ -338,7 +387,7 @@ def button_callback(update: tg.Update, context: db_utils.RedisContext):
                 )
             )
         elif args["args"][0] == "ANON_MODE_ON":
-            context.db.anon_mode_on(update.effective_user)
+            context.db.set_anon_mode(update.effective_user, True)
             update.callback_query.answer(
                 context.langtable["anonmode-on"], show_alert=True
             )
@@ -349,7 +398,7 @@ def button_callback(update: tg.Update, context: db_utils.RedisContext):
                             tg.InlineKeyboardButton(
                                 text=context.langtable["anonmode-button"].format(
                                     state="🟢"
-                                    if context.db.is_anon(update.effective_user)
+                                    if context.db.get_anon_mode(update.effective_user)
                                     else "🔴"
                                 ),
                                 callback_data=f"{update.effective_user.id}\nMAIN\nANON_MODE_OFF",
@@ -363,7 +412,7 @@ def button_callback(update: tg.Update, context: db_utils.RedisContext):
             options = parse_options(update.effective_message.reply_markup)
             if options[args["args"][1]] == 0:
                 options[args["args"][1]] = (
-                    len(module.OPTIONS[args["args"][1]]["options"]) - 1
+                    len(get_options_list(options, args["args"][1])) - 1
                 )
             else:
                 options[args["args"][1]] -= 1
@@ -371,16 +420,18 @@ def button_callback(update: tg.Update, context: db_utils.RedisContext):
             update.effective_message.edit_reply_markup(
                 format_options(update.effective_user, indexes=options)
             )
-            new_value = module.OPTIONS[args["args"][1]]["options"][
+            new_value = tuple(module.OPTIONS[args["args"][1]]["options"])[
                 options[args["args"][1]]
             ]
-            update.callback_query.answer(context.langtable[new_value])
+            update.callback_query.answer(
+                f"{context.langtable['chosen-popup']} {context.langtable[args['args'][1]]} - {context.langtable[new_value]}"
+            )
 
         elif args["args"][0] == "NEXT":
             options = parse_options(update.effective_message.reply_markup)
             if (
                 options[args["args"][1]]
-                == len(module.OPTIONS[args["args"][1]]["options"]) - 1
+                == len(get_options_list(options, args["args"][1])) - 1
             ):
                 options[args["args"][1]] = 0
             else:
@@ -389,10 +440,12 @@ def button_callback(update: tg.Update, context: db_utils.RedisContext):
             update.effective_message.edit_reply_markup(
                 format_options(update.effective_user, indexes=options)
             )
-            new_value = module.OPTIONS[args["args"][1]]["options"][
+            new_value = tuple(module.OPTIONS[args["args"][1]]["options"])[
                 options[args["args"][1]]
             ]
-            update.callback_query.answer(context.langtable[new_value])
+            update.callback_query.answer(
+                f"{context.langtable['chosen-popup']} {context.langtable[args['args'][1]]} - {context.langtable[new_value]}"
+            )
 
         elif args["args"][0] == "DESC":
             update.callback_query.answer()
@@ -412,42 +465,39 @@ def button_callback(update: tg.Update, context: db_utils.RedisContext):
                 context.bot_data["matches"][new.id] = new
                 new.init_turn(update.effective_user.language_code)
             elif options["mode"] == "online":
-                opponent = get_opponent(
-                    context.bot_data["queue"],
-                    update.effective_user,
-                    update.effective_chat.id,
-                    options=options,
-                )
+                opponent = get_opponent(context.bot_data["queue"], options)
                 if opponent:
+                    context.bot_data["queue"].remove(opponent)
                     update.effective_message.edit_text(context.langtable["match-found"])
-                    opponent.msg.edit_text(context.langtable["match-found"])
+                    opponent["msg"].edit_text(context.langtable["match-found"])
 
-                    if opponent.chat_id == update.effective_chat.id:
+                    if opponent["chat_id"] == update.effective_chat.id:
                         new = module.GroupMatch(
-                            opponent.user,
+                            opponent["user"],
                             update.effective_user,
-                            opponent.chat_id,
+                            opponent["chat_id"],
                             options=options,
                             bot=context.bot,
                         )
                     else:
                         new = module.PMMatch(
-                            opponent.user,
+                            opponent["user"],
                             update.effective_user,
-                            opponent.chat_id,
+                            opponent["chat_id"],
                             update.effective_chat.id,
                             options=options,
                             bot=context.bot,
                         )
                     context.bot_data["matches"][new.id] = new
-                    new.init_turn(update.effective_user.language_code)
+                    new.init_turn()
                 else:
                     context.bot_data["queue"].append(
-                        QueuePoint(
-                            update.effective_user,
-                            update.effective_message,
-                            options=options,
-                        )
+                        {
+                            "user": update.effective_user,
+                            "msg": update.effective_message,
+                            "chat_id": update.effective_chat.id,
+                            "options": options,
+                        }
                     )
                     msg_lines = [
                         context.langtable["awaiting-opponent"],
@@ -469,18 +519,11 @@ def button_callback(update: tg.Update, context: db_utils.RedisContext):
                         ),
                     )
             elif options["mode"] == "invite":
-                context.user_data.update(
-                    {
-                        "pending_req_msg": update.effective_message.edit_text(
-                            context.langtable["invite-spec-req"]
-                        ),
-                        "pending_options": options,
-                    }
-                )
+                update.effective_message.edit_text(context.langtable["invite-sent"])
 
         elif args["args"][0] == "CANCEL":
             for index, queued in enumerate(context.bot_data["queue"]):
-                if queued.user == update.effective_user:
+                if queued["user"] == update.effective_user:
                     del context.bot_data["queue"][index]
                     update.effective_message.edit_text(
                         context.langtable["search-cancelled"]
@@ -491,55 +534,31 @@ def button_callback(update: tg.Update, context: db_utils.RedisContext):
             update.effective_message.edit_reply_markup()
 
         elif args["args"][0] == "ACCEPT":
-            invite = get_opponent(
-                context.bot_data["queue"],
-                update.effective_user,
-                update.effective_chat.id,
-                options=context.dispatcher.user_data[args["args"][1]][
-                    "pending_options"
-                ],
-                created_by_uid=args["args"][1],
-            )
-            if invite:
-                update.effective_message.edit_text(
-                    context.langtable["invite-accepted"].format(name=invite.user.name)
-                )
-                invite.msg.edit_text(context.langtable["match-found"])
-                new = module.PMMatch(
-                    invite.user,
+            challenge = context.db.get_invite(args["args"][1])
+            if challenge:
+                new = module.GroupMatch(
+                    challenge["from_user"],
                     update.effective_user,
-                    invite.chat_id,
-                    update.effective_chat.id,
-                    options=invite.options,
+                    None,
+                    msg=module.InlineMessageAdapter(
+                        update.callback_query.inline_message_id, context.bot
+                    ),
+                    options=challenge["options"],
                     bot=context.bot,
                 )
                 context.bot_data["matches"][new.id] = new
-                new.init_turn(update.effective_user.language_code)
+                new.init_turn()
+            else:
+                context.bot.edit_message_text(
+                    inline_message_id=update.callback_query.inline_message_id,
+                    text=context.langtable["error-msg"],
+                )
 
-        elif args["args"][0] == "DECLINE":
-            for index, queued in enumerate(context.bot_data["queue"]):
-                if all(
-                    [
-                        queued.is_user_invite
-                        and queued.invite_msg.chat_id == update.effective_user,
-                        queued.user.id == args["args"][1],
-                    ]
-                ):
-                    del context.bot_data["queue"][index]
-                    update.effective_message.edit_text(
-                        context.langtable["invite-declined"]
-                    )
-                    return
-
-            update.callback_query.answer(context.langtable["error-popup-msg"])
-            update.effective_message.edit_reply_markup()
-
+    elif args["target_id"] == "module":
+        module.KEYBOARD_BUTTONS[args["args"[0]]](update, context, args["args"])
     else:
         if context.bot_data["matches"].get(args["target_id"]):
-            res = context.bot_data["matches"][args["target_id"]].handle_input(
-                update.effective_user.language_code,
-                args["args"],
-            )
+            res = context.bot_data["matches"][args["target_id"]].handle_input(args["args"])
             res = res if res else (None, False)
             if context.bot_data["matches"][args["target_id"]].result != "*":
                 del context.bot_data["matches"][args["target_id"]]
@@ -548,8 +567,8 @@ def button_callback(update: tg.Update, context: db_utils.RedisContext):
             update.callback_query.answer(text=context.langtable["game-not-found-error"])
 
 
-def main():
-    updater = tg.ext.Updater(
+def create_app() -> flask.Flask:
+    dispatcher = tg.ext.Updater(
         token=os.environ["BOT_TOKEN"],
         defaults=tg.ext.Defaults(quote=True),
         persistence=db_utils.RedisPersistence(
@@ -560,38 +579,69 @@ def main():
             decoder=decode_data,
         ),
         context_types=tg.ext.ContextTypes(context=db_utils.RedisContext),
-        user_sig_handler=stop_bot,
-    )
-    if not updater.dispatcher.bot_data:
-        updater.dispatcher.bot_data = {"queue": [], "matches": {}}
+        user_sig_handler=stop_bot
+    ).dispatcher
+    if not dispatcher.bot_data:
+        dispatcher.bot_data["matches"] = {}
     else:
-        updater.dispatcher.bot_data["matches"] = {
-            k: module.from_dict(v, k, updater.bot)
-            for k, v in updater.dispatcher.bot_data["matches"].items()
+        dispatcher.bot_data["matches"] = {
+            k: module.from_dict(v, k, dispatcher.bot)
+            for k, v in dispatcher.bot_data["matches"].items()
         }
-    module.BaseMatch.db = updater.persistence.conn
+    dispatcher.bot_data.update({"challenges": {}, "queue": []})
 
-    updater.dispatcher.add_handler(tg.ext.CallbackQueryHandler(button_callback))
-    updater.dispatcher.add_handler(tg.ext.CommandHandler("start", start))
-    updater.dispatcher.add_handler(
+    module.init(IS_DEBUG, dispatcher.persistence.conn)
+
+    dispatcher.add_handler(tg.ext.InlineQueryHandler(send_invite_inline))
+    dispatcher.add_handler(tg.ext.ChosenInlineResultHandler(create_invite))
+    dispatcher.add_handler(tg.ext.CallbackQueryHandler(button_callback))
+    dispatcher.add_handler(tg.ext.CommandHandler("start", start))
+    dispatcher.add_handler(
         tg.ext.CommandHandler(module.__name__, boardgame_menu)
     )
-    updater.dispatcher.add_handler(tg.ext.CommandHandler("settings", settings))
-    updater.dispatcher.add_handler(
-        tg.ext.MessageHandler(tg.ext.filters.Filters.contact, spec_invite_with_contact)
-    )
-    updater.dispatcher.add_handler(
+    dispatcher.add_handler(tg.ext.CommandHandler("settings", settings))
+    dispatcher.add_handler(
         tg.ext.MessageHandler(tg.ext.filters.Filters.regex("^/"), unknown)
     )
+    dispatcher.add_error_handler(error_handler)
+
     for key in module.langtable.keys():
-        updater.bot.set_my_commands(
+        dispatcher.bot.set_my_commands(
             list(module.langtable[key]["cmds"].items()), language_code=key
         )
 
-    updater.bot.send_message(chat_id=os.environ["CREATOR_ID"], text="Бот включен")
-    updater.start_polling(drop_pending_updates=True)
-    updater.idle()
+    app = flask.Flask(__name__)
+
+    def process_update():
+        logger.info(f"Handling update: {flask.request.json}")
+        dispatcher.process_update(tg.Update.de_json(flask.request.json, dispatcher.bot))
+        return "<p>True</p>"
+
+    def fetch_dynamic(filename):
+        path = os.path.join("images", "temp", filename)
+        data = io.BytesIO(open(path, "rb").read())
+        os.remove(path)
+        return flask.send_file(data, download_name=filename)
+
+    def fetch_static(filename):
+        return flask.send_file(
+            os.path.join("images", "static", filename), 
+            download_name=filename
+        )
+
+    app.add_url_rule(f"/{os.environ['BOT_TOKEN']}/dynamic/<filename>", view_func=fetch_dynamic)
+    app.add_url_rule(f"/{os.environ['BOT_TOKEN']}/static/<filename>", view_func=fetch_static)
+    app.add_url_rule(f"/{os.environ['BOT_TOKEN']}/send-update", view_func=process_update, methods=["POST"])
+    dispatcher.bot.set_webhook("/".join([os.environ["HOST_URL"], os.environ["BOT_TOKEN"], "send-update"]))
+    dispatcher.bot.send_message(chat_id=os.environ["CREATOR_ID"], text="Бот включен")
+
+    return app
 
 
 if __name__ == "__main__":
-    main()
+    from pyngrok import ngrok
+
+    os.environ["HOST_URL"] = ngrok.connect(addr="4096").public_url.replace("http://", "https://")
+    
+    app = create_app()
+    app.run(host="localhost", port=4096)

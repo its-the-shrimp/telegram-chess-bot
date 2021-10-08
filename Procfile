@@ -1,1 +1,1 @@
-work: python main.py
+web: gunicorn main:create_app()
