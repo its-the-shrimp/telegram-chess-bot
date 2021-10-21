@@ -3,7 +3,7 @@ import random
 import itertools
 import functools
 from typing import Union
-from .utils import decode_pos, encode_pos, BoardPoint
+from .utils import BoardPoint
 from .core import Move, BoardInfo, BasePiece, King
 
 IDEAL_N_CTRL_POS = {
@@ -18,14 +18,14 @@ IDEAL_N_CTRL_POS = {
 
 def decode_engine_move(raw: str, board: BoardInfo) -> Move:
     return Move.from_piece(
-        board[decode_pos(raw[:2])],
-        decode_pos(raw[2:4]),
+        board[BoardPoint(raw[:2])],
+        BoardPoint(raw[2:4]),
         new_piece=raw[4] if len(raw) == 5 else "",
     )
 
 
 def encode_engine_move(move: Move) -> str:
-    res = encode_pos(move.src) + encode_pos(move.dst)
+    res = str(move.src) + str(move.dst)
     return res + (move.new_piece.fen_symbol[0] if move.new_piece else "")
 
 
@@ -130,7 +130,7 @@ def eval_pieces_defense(board: BoardInfo) -> dict[BoardPoint, float]:
     res = {}
     for file in range(8):
         for rank in range(8):
-            pos = BoardPoint(column=file, row=rank)
+            pos = BoardPoint(file, rank)
             if board[pos]:
                 res[pos] = len([i.piece.value for i in all_white_moves if i.dst == pos])
                 res[pos] -= len(

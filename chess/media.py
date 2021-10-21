@@ -5,8 +5,10 @@ from PIL import Image, ImageDraw, ImageFont
 import numpy
 import os
 import colorsys
-from .core import get_pgn_moveseq, get_moves, BoardInfo, Move
-from .utils import *
+from .core import BoardInfo, Move
+from .parsers import PGNParser, get_moves
+from .utils import BoardPoint
+from .base import langtable
 from .analysis import eval_pieces_defense, ChessEngine
 
 
@@ -70,11 +72,11 @@ INCOMING_POINTER = Image.fromarray(INCOMING_POINTER)
 
 def _imagepos(pos: BoardPoint, size: Union[list, tuple, set]):
     return [
-        BOARD_OFFSET[0] + TILE_SIZE // 2 + TILE_SIZE * pos.column - size[0] // 2,
+        BOARD_OFFSET[0] + TILE_SIZE // 2 + TILE_SIZE * pos.file - size[0] // 2,
         BOARD.height
         - BOARD_OFFSET[1]
         - TILE_SIZE // 2
-        - TILE_SIZE * pos.row
+        - TILE_SIZE * pos.rank
         - size[1] // 2,
     ]
 
@@ -122,7 +124,7 @@ def _board_image(
             mask=POINTER,
         )
 
-    prev_moves = get_moves(boards)
+    prev_moves = list(get_moves(boards))
     if prev_moves:
         for move in [prev_moves[-1].src, prev_moves[-1].dst]:
             board_img.paste(
@@ -159,7 +161,7 @@ def _board_image(
             anchor="rd" if whites_value > blacks_value else "ra",
         )
 
-    lines = get_pgn_moveseq(
+    lines = PGNParser.encode_moveseq(
         prev_moves, result=None, language_code="emoji", turns_per_line=1
     ).splitlines()
     max_length = max([SMALL_FONT.getlength(line) for line in lines] + [168])

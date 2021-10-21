@@ -1,11 +1,17 @@
 from . import media, analysis
-from .utils import encode_pos, decode_pos, BoardPoint, STARTPOS, langtable, InlineMessageAdapter, create_match_id
+from .base import (
+    format_callback_data,
+    parse_callback_data,
+    langtable,
+    InlineMessageAdapter,
+    create_match_id,
+    get_file_url,
+    get_tempfile_url,
+)
+from .utils import BoardPoint, STARTPOS
 from .core import (
     Move,
     BoardInfo,
-    get_moves,
-    get_pgn_moveseq,
-    decode_pgn_moveseq,
     BasePiece,
     Pawn,
     Knight,
@@ -19,9 +25,10 @@ from .matches import (
     GroupMatch,
     PMMatch,
     AIMatch,
-    from_dict,
+    from_bytes,
     get_pgn_file,
 )
+from .parsers import PGNParser, CGNParser
 
 
 def init(is_debug: bool, conn):
@@ -30,24 +37,22 @@ def init(is_debug: bool, conn):
 
 
 OPTIONS = {
-    "ruleset": {"options": {"std-chess": {}}, "conditions": {}},
+    "ruleset": {"values": {"std-chess": None}},
     "mode": {
-        "options": {
-            "online": {},
-            "vsbot": {"ruleset": lambda ruleset: ruleset != "fog-of-war"},
-            "invite": {},
+        "values": {
+            "online": None,
+            "vsbot": lambda obj: obj["ruleset"] != "fog-of-war",
+            "invite": None,
         },
-        "conditions": {},
     },
     "timectrl": {
-        "options": {"classic": {}, "rapid": {}, "blitz": {}},
-        "conditions": {"mode": lambda mode: mode != "vsbot"},
+        "values": {"classic": None, "rapid": None, "blitz": None},
+        "condition": lambda obj: obj["mode"] != "vsbot",
     },
     "difficulty": {
-        "options": {"low-diff": {}, "mid-diff": {}, "high-diff": {}, "max-diff": {}},
-        "conditions": {"mode": lambda mode: mode == "vsbot"},
-    },
+        "values": {"low-diff": None, "mid-diff": None, "high-diff": None, "max-diff": None},
+        "condition": lambda obj: obj["mode"] == "vsbot",
+    }
 }
 KEYBOARD_BUTTONS = {"DOWNLOAD": get_pgn_file}
-INVITE_IMAGE = "https://raw.githubusercontent.com/schvv31n/telegram-chess-bot/master/images/chess/board.png"
-INVITE_THUMBNAIL = "https://raw.githubusercontent.com/schvv31n/telegram-chess-bot/master/images/chess/inline-thumb.png"
+INVITE_IMAGE = "https://avatars.githubusercontent.com/u/73731786?s=400&u=8e7a61eb0beaef03fbb151a70861097ae3c90fdf&v=4"

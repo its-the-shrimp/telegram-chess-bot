@@ -1,46 +1,32 @@
 import io
-import time
+import queue
 import os
 import json
 from typing import Callable, Optional
 import telegram as tg
-import chess as module
-import db_utils
+import chess as core
+import bot_utils
 import difflib
-import gzip
 import logging
 import re
 import traceback
 import flask
+import time
 
 debug_env_path = os.path.join(os.path.dirname(__file__), "debug_env.json")
 INLINE_OPTION_PATTERN = re.compile(r"\w+:\d")
 IS_DEBUG = os.path.exists(debug_env_path)
+TelegramCallback = Callable[[tg.Update, bot_utils.BoardGameContext], None]
 
+bot_utils.BoardGameContext.menu = bot_utils.MenuFormatter.from_dict(core.OPTIONS)
 if IS_DEBUG:
-    loglevel = logging.DEBUG
     with open(debug_env_path) as r:
         os.environ.update(json.load(r))
-else:
-    loglevel = logging.INFO
-
-
-class ExtFormatter(logging.Formatter):
-    last_row_created: int = time.monotonic_ns()
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def format(self, record: logging.LogRecord) -> str:
-        cur_row_created = time.monotonic_ns()
-        record.interval = (cur_row_created - self.last_row_created) // 10**6
-        self.last_row_created = cur_row_created
-        return super().format(record)
-
-handler = logging.StreamHandler()
-handler.setFormatter(ExtFormatter("[{interval} ms] {levelname} {name}:\n\t{message}\n", style="{"))
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-logger.addHandler(handler)
+logging.basicConfig(
+    format="{levelname} {name}: {message}",
+    style="{",
+    level=logging.DEBUG
+)
 
 try:
     os.mkdir(os.path.join(os.path.dirname(__file__), "images", "temp"))
@@ -52,58 +38,36 @@ group_thread = tg.ext.DelayQueue()
 pm_thread = tg.ext.DelayQueue()
 
 
-def stop_bot(_, frame):
-        updater = frame.f_locals["self"]
-        counter = {}
-        for key in updater.persistence.conn.keys(pattern="*:lang"):
-            key = updater.persistence.conn.get(key).decode()
-            if key:
-                counter[key] += 1
-            else:
-                counter[key] = 1
-
-        updater.bot.send_message(
-            text="\n".join([f"{k}: {v}" for k, v in counter.items()]),
-            chat_id=os.environ["CREATOR_ID"],
-        )
-        group_thread.stop()
-        pm_thread.stop()
-        exit()
-
-
 def get_opponent(queue: list[dict], options: dict) -> Optional[dict]:
     for queuepoint in reversed(queue):
         if options == queuepoint["options"]:
             return queuepoint
 
 
-def avoid_spam(f: Callable) -> Callable:
-    def decorated(update: tg.Update, context: db_utils.RedisContext):
+def _tg_adapter(f: TelegramCallback) -> TelegramCallback:
+    def decorated(update: tg.Update, context: bot_utils.BoardGameContext):
+        try:
+            return f(update, context)
+        except Exception as exc:
+            context.dispatcher.dispatch_error(update, exc)
+
+    return decorated
+
+def tg_adapter(f: TelegramCallback) -> TelegramCallback:
+    def decorated(update: tg.Update, context: bot_utils.BoardGameContext):
 
         if getattr(update.effective_chat, "type", tg.Chat.PRIVATE) in (
             tg.Chat.PRIVATE,
             tg.Chat.SENDER,
         ):
-            pm_thread._queue.put((tg_adapter(f), (update, context), {}))
+            pm_thread._queue.put((_tg_adapter(f), (update, context), {}))
         else:
-            group_thread._queue.put((tg_adapter(f), (update, context), {}))
+            group_thread._queue.put((_tg_adapter(f), (update, context), {}))
 
     return decorated
 
 
-def tg_adapter(
-    f: Callable[[tg.Update, db_utils.RedisContext], None]
-) -> Callable[[tg.Update, db_utils.RedisContext], None]:
-    def decorated(update: tg.Update, context: db_utils.RedisContext):
-        context.db.cache_user_data(update.effective_user)
-        context.langtable = module.langtable[update.effective_user.language_code]
-
-        return f(update, context)
-
-    return decorated
-
-
-def error_handler(update: tg.Update, context: db_utils.RedisContext):
+def error_handler(update: tg.Update, context: bot_utils.BoardGameContext):
     try:
         raise context.error
     except Exception as err:
@@ -113,139 +77,28 @@ def error_handler(update: tg.Update, context: db_utils.RedisContext):
                 text="Ошибка: несколько программ подключены к одному боту",
             )
         else:
-            tb = traceback.format_exc(limit=10) + "\n\n\n" + str(update.to_dict())
+            tb = traceback.format_exc(limit=10) + "\n\n" + json.dumps(update.to_dict(), indent=2)
             tb = tb[max(0, len(tb) - tg.constants.MAX_MESSAGE_LENGTH) :]
 
-            context.bot.send_message(chat_id=os.environ["CREATOR_ID"], text=tb)
+            context.bot.send_message(
+                chat_id=os.environ["CREATOR_ID"], 
+                text=tb,
+                entities=[tg.MessageEntity(tg.MessageEntity.PRE, 0, len(tb))]
+            )
 
-        if IS_DEBUG:
+        if IS_DEBUG and not isinstance(err, tg.error.Unauthorized):
             raise err
 
 
-def decode_data(_, obj: dict) -> dict:
-    return {k: gzip.decompress(v).decode() for k, v in obj.items()}
-
-
-def parse_callbackquery_data(data: str) -> dict:
-    data = data.split("\n")
-    res = {
-        "expected_uid": int(data[0]) if data[0] else None,
-        "target_id": data[1],
-        "args": [],
-    }
-    for argument in data[2].split("#"):
-        if argument.isdigit():
-            res["args"].append(int(argument))
-        elif argument:
-            res["args"].append(argument)
-        else:
-            res["args"].append(None)
-
-    return res
-
-
-def prettify_options(options: dict[str, int], lang_code: str) -> str:
-    langtable = module.langtable[lang_code]
-    res = langtable["options-title"] + "\n"
-    for k, v in options.items():
-        options_list = tuple(module.OPTIONS[k]["options"].keys())
-        res += langtable[options_list[v]] + ", "
-
-    return res.removeprefix(", ")
-
-
-def format_options(
-    user: tg.User, indexes: dict[str, int] = None
-) -> tg.InlineKeyboardMarkup:
-    res = []
-    if indexes is None:
-        indexes = {name: 0 for name in module.OPTIONS}
-
-    for name, option in module.OPTIONS.items():
-        chosen = tuple(option["options"].keys())[indexes.get(name, 0)]
-        conditions_passed = True
-        for c_option, c_func in option["conditions"].items():
-            if not c_func(
-                tuple(module.OPTIONS[c_option]["options"].keys())[indexes[c_option]]
-            ):
-                conditions_passed = False
-
-        if conditions_passed:
-            res.append(
-                [
-                    tg.InlineKeyboardButton(
-                        text="◀️", callback_data=f"{user.id}\nMAIN\nPREV#{name}"
-                    ),
-                    tg.InlineKeyboardButton(
-                        text=module.langtable[user.language_code][chosen],
-                        callback_data=f"{user.id}\nMAIN\nDESC#{name}#{indexes.get(name, 0)}",
-                    ),
-                    tg.InlineKeyboardButton(
-                        text="▶️", callback_data=f"{user.id}\nMAIN\nNEXT#{name}"
-                    ),
-                ]
-            )
-
-    if indexes["mode"] == tuple(module.OPTIONS["mode"]["options"]).index("invite"):
-        inline_query = " ".join([f"{k}:{v}" for k, v in indexes.items() if k != "mode"])
-    else:
-        inline_query = None
-
-    res.append(
-        [
-            tg.InlineKeyboardButton(
-                text=module.langtable[user.language_code]["cancel-button"],
-                callback_data=f"{user.id}\nMAIN\nCANCEL",
-            ),
-            tg.InlineKeyboardButton(
-                text=module.langtable[user.language_code]["play-button"],
-                switch_inline_query=inline_query,
-                callback_data=None if inline_query else f"{user.id}\nMAIN\nPLAY",
-            ),
-        ]
-    )
-
-    return tg.InlineKeyboardMarkup(res)
-
-
-def parse_options(keyboard: tg.InlineKeyboardMarkup) -> dict[str, int]:
-    res = {}
-    for column in keyboard.inline_keyboard[:-1]:
-        column_data = parse_callbackquery_data(column[1].callback_data)["args"]
-        res[column_data[1]] = column_data[2]
-
-    return res
-
-
-def get_options_list(indexes: dict[str, int], key: str) -> list[str]:
-    res = []
-    for option, conditions in module.OPTIONS[key]["options"].items():
-        res.append(option)
-        for c_option, c_func in conditions.items():
-            if not c_func(
-                tuple(module.OPTIONS[c_option]["options"])[indexes.get(c_option, 0)]
-            ):
-                del res[-1]
-                break
-
-    return res
-
-
-def encode_data(self, obj):
-    self.bot_data["matches"] = {
-        k: v.to_dict() for k, v in self.bot_data["matches"].items()
-    }
-    res = self.default_encoder(self, obj)
-    return {k: gzip.compress(v) for k, v in res.items()}
-
-
-@avoid_spam
-def start(update: tg.Update, context: db_utils.RedisContext):
+@tg_adapter
+def start(update: tg.Update, context: bot_utils.BoardGameContext):
     update.effective_chat.send_message(text=context.langtable["start-msg"])
 
+@tg_adapter
+def unknown(update: tg.Update, context: bot_utils.BoardGameContext):
+    if not update.effective_message.text.isascii():
+        return 
 
-@avoid_spam
-def unknown(update: tg.Update, context: db_utils.RedisContext):
     ratios = []
     d = difflib.SequenceMatcher(a=update.effective_message.text)
     for command in context.langtable["cmds"].keys():
@@ -257,8 +110,8 @@ def unknown(update: tg.Update, context: db_utils.RedisContext):
     )
 
 
-@avoid_spam
-def settings(update: tg.Update, context: db_utils.RedisContext):
+@tg_adapter
+def settings(update: tg.Update, context: bot_utils.BoardGameContext):
     is_anon = context.db.get_anon_mode(update.effective_user)
     update.effective_message.reply_text(
         context.langtable["settings-msg"],
@@ -270,7 +123,11 @@ def settings(update: tg.Update, context: db_utils.RedisContext):
                         text=context.langtable["anonmode-button"].format(
                             state="🟢" if is_anon else "🔴"
                         ),
-                        callback_data=f"{update.effective_user.id}\nMAIN\n{'ANON_MODE_OFF' if is_anon else 'ANON_MODE_ON'}",
+                        callback_data=core.format_callback_data(
+                            "ANON_MODE_OFF" if is_anon else "ANON_MODE_ON",
+                            handler_id="MAIN",
+                            expected_uid=update.effective_user.id
+                        ),
                     )
                 ]
             ]
@@ -278,36 +135,29 @@ def settings(update: tg.Update, context: db_utils.RedisContext):
     )
 
 
-@avoid_spam
-def boardgame_menu(update: tg.Update, context: db_utils.RedisContext) -> None:
+@tg_adapter
+def boardgame_menu(update: tg.Update, context: bot_utils.BoardGameContext) -> None:
     update.effective_chat.send_message(
         context.langtable["game-setup"],
-        reply_markup=format_options(update.effective_user),
+        reply_markup=context.menu.encode(update.effective_user),
     )
 
 
 @tg_adapter
-def send_invite_inline(update: tg.Update, context: db_utils.RedisContext) -> None:
-    raw = update.inline_query.query.strip(" ")
-    options = (
-        token.split(":")
-        for token in raw.split(" ")
-        if INLINE_OPTION_PATTERN.match(token)
-    )
-    options = {k: int(v) for k, v in options}
-    try:
-        challenge_desc = prettify_options(options, update.effective_user.language_code)
-    except LookupError:
-        return
+def send_invite_inline(update: tg.Update, context: bot_utils.BoardGameContext) -> None:
+    logging.info(f"Handling inline query: {update.inline_query.query}")
+    
+    options = context.menu.tg_decode(update.inline_query.query)
+    challenge_desc = context.menu.prettify(options, update.effective_user.language_code)
 
-    match_id = module.create_match_id()
+    match_id = core.create_match_id()
 
     update.inline_query.answer(
         results=(
             tg.InlineQueryResultPhoto(
                 match_id,
-                module.INVITE_IMAGE,
-                module.INVITE_THUMBNAIL,
+                core.INVITE_IMAGE,
+                core.INVITE_IMAGE,
                 title=context.langtable["send-challenge"],
                 description=challenge_desc,
                 caption=context.langtable["invite-msg"].format(
@@ -318,7 +168,11 @@ def send_invite_inline(update: tg.Update, context: db_utils.RedisContext) -> Non
                         [
                             tg.InlineKeyboardButton(
                                 text=context.langtable["accept-button"],
-                                callback_data=f"\nMAIN\nACCEPT#{match_id}",
+                                callback_data=core.format_callback_data(
+                                    "ACCEPT",
+                                    [match_id],
+                                    handler_id="MAIN"
+                                ),
                             )
                         ]
                     ]
@@ -329,26 +183,20 @@ def send_invite_inline(update: tg.Update, context: db_utils.RedisContext) -> Non
 
 
 @tg_adapter
-def create_invite(update: tg.Update, context: db_utils.RedisContext):
-    raw = update.chosen_inline_result.query.strip(" ")
-    options = (
-        token.split(":")
-        for token in raw.split(" ")
-        if INLINE_OPTION_PATTERN.match(token)
-    )
-    options = {k: int(v) for k, v in options}
+def create_invite(update: tg.Update, context: bot_utils.BoardGameContext):
+    options = context.menu.tg_decode(update.chosen_inline_result.query)
 
     context.db.create_invite(
         update.chosen_inline_result.result_id, update.effective_user, options
     )
 
 
-@avoid_spam
+@tg_adapter
 def button_callback(
-    update: tg.Update, context: db_utils.RedisContext
+    update: tg.Update, context: bot_utils.BoardGameContext
 ) -> Optional[tuple]:
-    args = parse_callbackquery_data(update.callback_query.data)
-    logger.debug(f"Handling user input: {args}")
+    args = core.parse_callback_data(update.callback_query.data)
+    logging.debug(f"Handling user input: {args}")
     if (
         args["expected_uid"]
         and args["expected_uid"] != update.callback_query.from_user.id
@@ -363,9 +211,9 @@ def button_callback(
         return
 
     if args["target_id"] == "MAIN":
-        if args["args"][0] == "NA":
+        if args["command"] == "NA":
             update.callback_query.answer(text=context.langtable["error-popup-msg"])
-        elif args["args"][0] == "ANON_MODE_OFF":
+        elif args["command"] == "ANON_MODE_OFF":
             context.db.set_anon_mode(update.effective_user, False)
             update.callback_query.answer(
                 context.langtable["anonmode-off"], show_alert=True
@@ -380,13 +228,17 @@ def button_callback(
                                     if context.db.get_anon_mode(update.effective_user)
                                     else "🔴"
                                 ),
-                                callback_data=f"{update.effective_user.id}\nMAIN\nANON_MODE_ON",
+                                callback_data=core.format_callback_data(
+                                    "ANON_MODE_ON",
+                                    expected_uid=update.effective_user.id,
+                                    handler_id="MAIN"
+                                ),
                             )
                         ]
                     ]
                 )
             )
-        elif args["args"][0] == "ANON_MODE_ON":
+        elif args["command"] == "ANON_MODE_ON":
             context.db.set_anon_mode(update.effective_user, True)
             update.callback_query.answer(
                 context.langtable["anonmode-on"], show_alert=True
@@ -401,78 +253,88 @@ def button_callback(
                                     if context.db.get_anon_mode(update.effective_user)
                                     else "🔴"
                                 ),
-                                callback_data=f"{update.effective_user.id}\nMAIN\nANON_MODE_OFF",
+                                callback_data=core.format_callback_data(
+                                    "ANON_MODE_OFF",
+                                    handler_id="MAIN",
+                                    expected_uid=update.effective_user.id
+
+                                ),
                             )
                         ]
                     ]
                 )
             )
 
-        elif args["args"][0] == "PREV":
-            options = parse_options(update.effective_message.reply_markup)
-            if options[args["args"][1]] == 0:
-                options[args["args"][1]] = (
-                    len(get_options_list(options, args["args"][1])) - 1
+        elif args["command"] == "PREV":
+            options = context.menu.decode(update.effective_message.reply_markup)
+            key = args["args"][0]
+
+            values = context.menu[key].available_values(options)
+            values_iter = reversed(values)
+            for value in values_iter:
+                if value == options[key]:
+                    try:
+                        options[key] = next(values_iter)
+                    except StopIteration:
+                        options[key] = values[-1]
+                    break
+
+            if len(values) > 1:
+                update.effective_message.edit_reply_markup(
+                    context.menu.encode(update.effective_user, indexes=options)
                 )
-            else:
-                options[args["args"][1]] -= 1
-
-            update.effective_message.edit_reply_markup(
-                format_options(update.effective_user, indexes=options)
-            )
-            new_value = tuple(module.OPTIONS[args["args"][1]]["options"])[
-                options[args["args"][1]]
-            ]
             update.callback_query.answer(
-                f"{context.langtable['chosen-popup']} {context.langtable[args['args'][1]]} - {context.langtable[new_value]}"
+                f"{context.langtable['chosen-popup']} {context.langtable[key]} - {context.langtable[options[key]]}"
             )
 
-        elif args["args"][0] == "NEXT":
-            options = parse_options(update.effective_message.reply_markup)
-            if (
-                options[args["args"][1]]
-                == len(get_options_list(options, args["args"][1])) - 1
-            ):
-                options[args["args"][1]] = 0
-            else:
-                options[args["args"][1]] += 1
+        elif args["command"] == "NEXT":
+            options = context.menu.decode(update.effective_message.reply_markup)
+            key = args["args"][0]
 
-            update.effective_message.edit_reply_markup(
-                format_options(update.effective_user, indexes=options)
-            )
-            new_value = tuple(module.OPTIONS[args["args"][1]]["options"])[
-                options[args["args"][1]]
-            ]
+            values = context.menu[key].available_values(options)
+            values_iter = iter(values)
+            for value in values_iter:
+                if value == options[key]:
+                    try:
+                        options[key] = next(values_iter)
+                    except StopIteration:
+                        options[key] = values[0]
+                    break
+            
+            if len(values) > 1:
+                update.effective_message.edit_reply_markup(
+                    context.menu.encode(update.effective_user, indexes=options)
+                )
             update.callback_query.answer(
-                f"{context.langtable['chosen-popup']} {context.langtable[args['args'][1]]} - {context.langtable[new_value]}"
+                f"{context.langtable['chosen-popup']} {context.langtable[key]} - {context.langtable[options[key]]}"
             )
 
-        elif args["args"][0] == "DESC":
+        elif args["command"] == "DESC":
             update.callback_query.answer()
 
-        elif args["args"][0] == "PLAY":
-            options = parse_options(update.effective_message.reply_markup)
-            options = {k: module.OPTIONS[k]["options"][v] for k, v in options.items()}
+        elif args["command"] == "PLAY":
+            options = context.menu.decode(update.effective_message.reply_markup)
 
             if options["mode"] == "vsbot":
                 update.effective_message.edit_text(context.langtable["match-found"])
-                new = module.AIMatch(
+                new = core.AIMatch(
                     update.effective_user,
                     update.effective_chat.id,
                     options=options,
                     bot=context.bot,
                 )
                 context.bot_data["matches"][new.id] = new
-                new.init_turn(update.effective_user.language_code)
+                new.init_turn()
             elif options["mode"] == "online":
                 opponent = get_opponent(context.bot_data["queue"], options)
+                logging.info(f"Opponent found: {opponent}")
                 if opponent:
                     context.bot_data["queue"].remove(opponent)
                     update.effective_message.edit_text(context.langtable["match-found"])
                     opponent["msg"].edit_text(context.langtable["match-found"])
 
                     if opponent["chat_id"] == update.effective_chat.id:
-                        new = module.GroupMatch(
+                        new = core.GroupMatch(
                             opponent["user"],
                             update.effective_user,
                             opponent["chat_id"],
@@ -480,7 +342,7 @@ def button_callback(
                             bot=context.bot,
                         )
                     else:
-                        new = module.PMMatch(
+                        new = core.PMMatch(
                             opponent["user"],
                             update.effective_user,
                             opponent["chat_id"],
@@ -499,20 +361,22 @@ def button_callback(
                             "options": options,
                         }
                     )
-                    msg_lines = [
-                        context.langtable["awaiting-opponent"],
-                        "",
-                        context.langtable["options-title"],
-                        ", ".join([context.langtable[i] for i in options.values()]),
-                    ]
                     update.effective_message.edit_text(
-                        "\n".join(msg_lines),
+                        "\n".join([
+                            context.langtable["awaiting-opponent"],
+                            "",
+                            context.menu.prettify(options, update.effective_user.language_code)
+                        ]),
                         reply_markup=tg.InlineKeyboardMarkup(
                             [
                                 [
                                     tg.InlineKeyboardButton(
                                         text=context.langtable["cancel-button"],
-                                        callback_data=f"{update.effective_user.id}\nMAIN\nCANCEL",
+                                        callback_data=core.format_callback_data(
+                                            "CANCEL",
+                                            handler_id="MAIN",
+                                            expected_uid=update.effective_user.id
+                                        ),
                                     )
                                 ]
                             ]
@@ -521,7 +385,7 @@ def button_callback(
             elif options["mode"] == "invite":
                 update.effective_message.edit_text(context.langtable["invite-sent"])
 
-        elif args["args"][0] == "CANCEL":
+        elif args["command"] == "CANCEL":
             for index, queued in enumerate(context.bot_data["queue"]):
                 if queued["user"] == update.effective_user:
                     del context.bot_data["queue"][index]
@@ -533,14 +397,15 @@ def button_callback(
             update.callback_query.answer(context.langtable["error-popup-msg"])
             update.effective_message.edit_reply_markup()
 
-        elif args["args"][0] == "ACCEPT":
-            challenge = context.db.get_invite(args["args"][1])
+        elif args["command"] == "ACCEPT":
+            challenge = context.db.get_invite(args["args"][0])
+            logging.info(f"invite {args['args'][0]}: {challenge}")
             if challenge:
-                new = module.GroupMatch(
+                new = core.GroupMatch(
                     challenge["from_user"],
                     update.effective_user,
                     None,
-                    msg=module.InlineMessageAdapter(
+                    msg=core.InlineMessageAdapter(
                         update.callback_query.inline_message_id, context.bot
                     ),
                     options=challenge["options"],
@@ -554,11 +419,11 @@ def button_callback(
                     text=context.langtable["error-msg"],
                 )
 
-    elif args["target_id"] == "module":
-        module.KEYBOARD_BUTTONS[args["args"[0]]](update, context, args["args"])
+    elif args["target_id"] == "core":
+        core.KEYBOARD_BUTTONS[args["command"]](update, context, args["args"])
     else:
         if context.bot_data["matches"].get(args["target_id"]):
-            res = context.bot_data["matches"][args["target_id"]].handle_input(args["args"])
+            res = context.bot_data["matches"][args["target_id"]].handle_input(args["command"], args["args"])
             res = res if res else (None, False)
             if context.bot_data["matches"][args["target_id"]].result != "*":
                 del context.bot_data["matches"][args["target_id"]]
@@ -568,36 +433,27 @@ def button_callback(
 
 
 def create_app() -> flask.Flask:
-    dispatcher = tg.ext.Updater(
-        token=os.environ["BOT_TOKEN"],
-        defaults=tg.ext.Defaults(quote=True),
-        persistence=db_utils.RedisPersistence(
-            url=os.environ["REDISCLOUD_URL"],
-            store_user_data=False,
-            store_chat_data=False,
-            encoder=encode_data,
-            decoder=decode_data,
+    dispatcher = tg.ext.Dispatcher(
+        tg.Bot(
+            os.environ["BOT_TOKEN"],
+            defaults=tg.ext.Defaults(quote=True)
         ),
-        context_types=tg.ext.ContextTypes(context=db_utils.RedisContext),
-        user_sig_handler=stop_bot
-    ).dispatcher
-    if not dispatcher.bot_data:
-        dispatcher.bot_data["matches"] = {}
-    else:
-        dispatcher.bot_data["matches"] = {
-            k: module.from_dict(v, k, dispatcher.bot)
-            for k, v in dispatcher.bot_data["matches"].items()
-        }
-    dispatcher.bot_data.update({"challenges": {}, "queue": []})
+        queue.Queue(),
+        context_types=tg.ext.ContextTypes(context=bot_utils.BoardGameContext),
+    )
+    conn = bot_utils.RedisInterface.from_url(os.environ["REDISCLOUD_URL"])
+    dispatcher.bot_data.update({"matches": {}, "queue": [], "challenges": {}})
+    for id, gamedata in conn._fetch_matches(core.from_bytes, dispatcher.bot):
+        dispatcher.bot_data["matches"][id] = core.from_bytes(gamedata, dispatcher.bot, id)
 
-    module.init(IS_DEBUG, dispatcher.persistence.conn)
+    core.init(IS_DEBUG, conn)
 
     dispatcher.add_handler(tg.ext.InlineQueryHandler(send_invite_inline))
     dispatcher.add_handler(tg.ext.ChosenInlineResultHandler(create_invite))
     dispatcher.add_handler(tg.ext.CallbackQueryHandler(button_callback))
     dispatcher.add_handler(tg.ext.CommandHandler("start", start))
     dispatcher.add_handler(
-        tg.ext.CommandHandler(module.__name__, boardgame_menu)
+        tg.ext.CommandHandler(core.__name__, boardgame_menu)
     )
     dispatcher.add_handler(tg.ext.CommandHandler("settings", settings))
     dispatcher.add_handler(
@@ -605,16 +461,19 @@ def create_app() -> flask.Flask:
     )
     dispatcher.add_error_handler(error_handler)
 
-    for key in module.langtable.keys():
+    for key in core.langtable.keys():
         dispatcher.bot.set_my_commands(
-            list(module.langtable[key]["cmds"].items()), language_code=key
+            list(core.langtable[key]["cmds"].items()), language_code=key
         )
 
     app = flask.Flask(__name__)
 
     def process_update():
-        logger.info(f"Handling update: {flask.request.json}")
+        logging.info(f"Handling update: {flask.request.json}")
+        start = time.monotonic_ns()
         dispatcher.process_update(tg.Update.de_json(flask.request.json, dispatcher.bot))
+        end = time.monotonic_ns()
+        logging.info(f"Handled update #{flask.request.json['update_id']} in {(end - start) // 1000000} ms")
         return "<p>True</p>"
 
     def fetch_dynamic(filename):
@@ -635,7 +494,10 @@ def create_app() -> flask.Flask:
     dispatcher.bot.set_webhook("/".join([os.environ["HOST_URL"], os.environ["BOT_TOKEN"], "send-update"]))
     dispatcher.bot.send_message(chat_id=os.environ["CREATOR_ID"], text="Бот включен")
 
-    return app
+    if IS_DEBUG:
+        return app, dispatcher
+    else:
+        return app
 
 
 if __name__ == "__main__":
@@ -643,5 +505,11 @@ if __name__ == "__main__":
 
     os.environ["HOST_URL"] = ngrok.connect(addr="4096").public_url.replace("http://", "https://")
     
-    app = create_app()
+    app, dispatcher = create_app()
     app.run(host="localhost", port=4096)
+
+    logging.info("Server shutting down...")
+    conn = bot_utils.RedisInterface()
+    conn._flush_matches(dispatcher.bot_data["matches"])
+    group_thread.stop()
+    pm_thread.stop()

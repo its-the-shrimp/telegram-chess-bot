@@ -22,7 +22,7 @@
         "mode": "Opponent",
         "timectrl": "Time control",
         "error-popup-msg": "Error",
-        "error-msg": "An error occured, please repeat your request",
+        "error-msg": "An unknown error occured. The developers are notified and the error will be fixed soon.",
         "unexpected-uid": "It is not your turn!",
         "pgn-file-caption": "Game record in PGN format",
         "pgn-fetch-error": "Game not found or outdated.",
