@@ -306,14 +306,14 @@ if __name__ == "__main__":
                 print(match.decode(errors="replace"), "\n")
             print(f"Total {count} matches ( {round(memory_sum / 1024, 2)} Kbytes) .")
 
-        if command == "del-match":
+        elif command == "del-match":
             try:
                 conn.delete(f"match:{args[0]}")
                 print(f"Match {args[0]} deleted.")
             except KeyError:
                 print("Match ID not specified.")
 
-        if command == "user-stats":
+        elif command == "user-stats":
             print("Number of users per language code:")
             allusers = 0
             for langcode, count in conn.get_langcodes_stats().items():
@@ -321,7 +321,7 @@ if __name__ == "__main__":
                 print(f"{langcode}: {count}")
             print(f"\nTotal {allusers} users.")
 
-        if command == "help":
+        elif command == "help":
             print("""
 List of commands:
     'matches' - Get information about all ongoing matches.
