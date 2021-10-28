@@ -29,9 +29,7 @@ EVALUATION_COLORS = {
     "??": "#d1423d",
     "□": "#9c9c9c",
 }
-MOVE_EVAL_DESC = {
-    k: v["move-eval-desc"] for k, v in langtable.items()
-}
+MOVE_EVAL_DESC = {k: v["move-eval-desc"] for k, v in langtable.items()}
 
 LARGE_FONT = ImageFont.truetype("Arial-unicode.ttf", 24)
 SMALL_FONT = LARGE_FONT.font_variant(size=20)
@@ -94,6 +92,8 @@ def _board_image(
 ):
     board_img = (custom_bg_pic or BOARD).copy()
     editor = ImageDraw.Draw(board_img)
+    if not lang_code:
+        lang_code = "en"
 
     for piece in boards[-1].board:
         piece_image = PIECES[type(piece).__name__][int(piece.is_white)]
@@ -150,8 +150,8 @@ def _board_image(
     editor.text((16, 664), player1_name, fiil="white", font=LARGE_FONT, anchor="ld")
     editor.text((16, 16), player2_name, fill="white", font=LARGE_FONT)
 
-    blacks_value = sum([piece.value for piece in boards[-1].blacks]) - 99
-    whites_value = sum([piece.value for piece in boards[-1].whites]) - 99
+    blacks_value = sum([piece.value for piece in boards[-1].blacks])
+    whites_value = sum([piece.value for piece in boards[-1].whites])
     if blacks_value != whites_value:
         editor.text(
             (496, 664 if whites_value > blacks_value else 16),
@@ -306,16 +306,21 @@ def board_video(
             move_evaluation=analyser.eval_move(
                 move,
                 18,
-                prev_move=match.states[index - 1] - match.states[index - 2] if index > 1 else None
-            ) if index and analyser else "",
-            pos_evaluation=analyser.eval_position(move, 18) if move and analyser else None
+                prev_move=match.states[index - 1] - match.states[index - 2]
+                if index > 1
+                else None,
+            )
+            if index and analyser
+            else "",
+            pos_evaluation=analyser.eval_position(move, 18)
+            if move and analyser
+            else None,
         )
         for i in range(15):
             writer.write(img_array)
     for i in range(15):
         writer.write(img_array)
-
-    thumbnail = cv2.resize(img_array, None, fx=0.5, fy=0.5)
+    thumbnail = cv2.resize(img_array, (200, 200))
     writer.release()
     video_data = open(path, "rb").read()
     os.remove(path)

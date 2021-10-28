@@ -1,10 +1,16 @@
 import os
 import json
 from typing import Callable, Iterable, Union
-from telegram import Bot
 import uuid
 import mimetypes
+import pickle
 import random
+from telegram.ext import Dispatcher, CallbackContext
+from telegram.utils import helpers
+from telegram import Bot, Update
+
+TelegramCallback = Callable[[Update, CallbackContext], None]
+
 
 class DefaultTable(dict):
     def __init__(self, *args, def_f: Callable = None, **kwargs):
@@ -44,12 +50,10 @@ def format_callback_data(
     expected_uid: int = None,
 ) -> str:
     args = map(lambda x: str(x) if x is not None else "", args)
-    return "\n".join([
-        str(expected_uid) if expected_uid else "",
-        handler_id,
-        command,
-        "#".join(args)
-    ])
+    return "\n".join(
+        [str(expected_uid) if expected_uid else "", handler_id, command, "#".join(args)]
+    )
+
 
 def parse_callback_data(data: str) -> dict[str, Union[str, int, None]]:
     data = data.split("\n")
@@ -72,26 +76,51 @@ def parse_callback_data(data: str) -> dict[str, Union[str, int, None]]:
 
 
 def get_tempfile_url(data: bytes, mimetype: str) -> str:
-    filename = "".join([
-        "temp",
-        uuid.uuid4().hex,
-        mimetypes.guess_extension(mimetype)
-    ])
+    filename = "".join(["temp", uuid.uuid4().hex, mimetypes.guess_extension(mimetype)])
     open(os.path.join("images", "temp", filename), "wb").write(data)
-    return "/".join([os.environ["HOST_URL"], os.environ["BOT_TOKEN"], "dynamic", filename])
+    return "/".join(
+        [os.environ["HOST_URL"], os.environ["BOT_TOKEN"], "dynamic", filename]
+    )
 
 
 def get_file_url(filename: str) -> str:
-    return "/".join([os.environ["HOST_URL"], os.environ["BOT_TOKEN"], "static", filename])
+    return "/".join(
+        [os.environ["HOST_URL"], os.environ["BOT_TOKEN"], "static", filename]
+    )
 
 
 def create_match_id(n=8) -> str:
     return "".join(
         [
-            random.choice("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-+")
+            random.choice(
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+            )
             for _ in range(n)
         ]
     )
+
+
+def set_pending_message_expire_hook(dispatcher: Dispatcher, f: TelegramCallback):
+    dispatcher.bot_data["pm_expire_hook"] = f
+
+
+def set_pending_message(
+    dispatcher: Dispatcher,
+    f: TelegramCallback,
+    args: tuple = (),
+    timeout: int = None,
+    is_single: bool = True,
+):
+    pmsg_id = create_match_id(n=16)
+
+    dispatcher.bot_data["conn"].set(
+        f"pm:{pmsg_id}:f", pickle.dumps((f, args)), ex=timeout
+    )
+    dispatcher.bot_data["conn"].set(
+        f"pm:{pmsg_id}:is-single", str(int(is_single)).encode(), ex=timeout
+    )
+
+    return helpers.create_deep_linked_url(dispatcher.bot.username, "pmid" + pmsg_id)
 
 
 langtable_cls = lambda obj: DefaultTable(obj, def_f=lambda _, k: k)

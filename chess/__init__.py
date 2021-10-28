@@ -1,13 +1,6 @@
+from .base import *
+
 from . import media, analysis
-from .base import (
-    format_callback_data,
-    parse_callback_data,
-    langtable,
-    InlineMessageAdapter,
-    create_match_id,
-    get_file_url,
-    get_tempfile_url,
-)
 from .utils import BoardPoint, STARTPOS
 from .core import (
     Move,
@@ -28,7 +21,7 @@ from .matches import (
     from_bytes,
     get_pgn_file,
 )
-from .parsers import PGNParser, CGNParser
+from .parsers import PGNParser, CGNParser, get_moves
 
 
 def init(is_debug: bool, conn):
@@ -50,9 +43,14 @@ OPTIONS = {
         "condition": lambda obj: obj["mode"] != "vsbot",
     },
     "difficulty": {
-        "values": {"low-diff": None, "mid-diff": None, "high-diff": None, "max-diff": None},
+        "values": {
+            "low-diff": None,
+            "mid-diff": None,
+            "high-diff": None,
+            "max-diff": None,
+        },
         "condition": lambda obj: obj["mode"] == "vsbot",
-    }
+    },
 }
 KEYBOARD_BUTTONS = {"DOWNLOAD": get_pgn_file}
-INVITE_IMAGE = "https://avatars.githubusercontent.com/u/73731786?s=400&u=8e7a61eb0beaef03fbb151a70861097ae3c90fdf&v=4"
+INVITE_IMAGE = "https://raw.githubusercontent.com/schvv31n/telegram-chess-bot/master/images/static/inline-thumb.jpg"

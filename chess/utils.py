@@ -9,6 +9,7 @@ DATE_FORMAT = "%Y.%m.%d"
 class BoardPoint:
     row: int
     column: int
+
     @overload
     def __new__(cls, src: str):
         ...
@@ -51,8 +52,8 @@ class BoardPoint:
     def __repr__(self):
         return f"BoardPoint({self.__str__()})"
 
-    def __int__(self):
-        return self.file * 8 + self.file
+    def __index__(self):
+        return self.file * 8 + self.rank
 
     def __iter__(self) -> Iterator:
         return (self.file, self.rank).__iter__()

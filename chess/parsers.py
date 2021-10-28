@@ -38,14 +38,16 @@ class PGNParser:
     @classmethod
     def encode_moveseq(
         cls,
-        positions: Union[Iterable["BoardInfo"], Iterable["Move"]],
+        moves: list["Move"] = None,
+        positions: Iterable["BoardInfo"] = None,
         result: str = "*",
         language_code: str = "en",
         line_length=80,
         turns_per_line=None,
     ) -> str:
         res = []
-        moves = positions if hasattr(positions, "__len__") else get_moves(positions)
+        if moves is None:
+            moves = get_moves(positions)
 
         for index, move in enumerate(moves):
             if index % 2 == 0:
@@ -140,30 +142,27 @@ class CGNParser:
     @classmethod
     def decode(cls, src: bytes) -> dict:
         data = {"headers": dict(x.split(b"\t") for x in src.splitlines())}
-        data["white_name"] = data["headers"].get(b"W")
-        data["black_name"] = data["headers"].get(b"B")
+        data["white_name"] = data["headers"].get(b"W").decode()
+        data["black_name"] = data["headers"].get(b"B").decode()
         data["date"] = (
             data["headers"][b"D"].decode() if b"D" in data["headers"] else None
         )
-        data["result"] = {v: k for k, v in cls.RESULT_CODES}[
+        data["result"] = {v: k for k, v in cls.RESULT_CODES.items()}[
             data["headers"].get(b"R", NOT_FINISHED)
         ]
 
-        boards = [
+        data["states"] = [
             BoardInfo.from_fen(data["headers"].get(b"S", STARTPOS.encode()).decode())
         ]
-        for move in map(
-            b"".join, zip(data["headers"][b"M"][::2], data["headers"][b"M"][1::2])
-        ):
-            boards.append(
-                boards[-1]
-                + Move.from_hash(int.from_bytes(move, byteorder="big"), boards[-1])
+        for move in zip(data["headers"][b"M"][::2], data["headers"][b"M"][1::2]):
+            data["states"].append(
+                data["states"][-1]
+                + Move.from_hash(int.from_bytes(b"%c%c" % move, byteorder="big"), data["states"][-1])
             )
 
         for k in b"WRBDSM":
-            if chr(k) in data["headers"]:
-                del data["headers"][chr(k)]
-
+            if b"%c" % k in data["headers"]:
+                del data["headers"][b"%c" % k]
         data["headers"] = {k.decode(): cls.unescape(v.decode()) for k, v in data["headers"].items()}
 
         return data

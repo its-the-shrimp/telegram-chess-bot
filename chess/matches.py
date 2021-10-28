@@ -15,8 +15,10 @@ from telegram import (
 import logging
 import datetime
 import threading
+
+from telegram.ext import Dispatcher, CallbackContext
 from . import core, media, analysis, utils, parsers, base
-from typing import Any, List, Union, Optional
+from typing import Any, Union, Optional
 
 MOVETYPE_MARKERS = {"normal": "", "killing": "❌", "castling": "🔀", "promotion": "⏫"}
 JSON = dict[str, Union[str, dict]]
@@ -36,16 +38,35 @@ def _group_items(obj: list[Any], n: int, head_item: bool = False) -> list[list[A
     return res
 
 
-def get_pgn_file(update: Update, context, args: List) -> None:
-    content = context.db.get(f"{args[1]}:pgn")
-    update.effective_message.edit_reply_markup()
-    if content:
-        update.effective_message.reply_document(
-            gzip.decompress(content),
-            caption=context.langtable["pgn-file-caption"],
-            filename=f"chess4u-{args[1]}.pgn",
-        )
-        context.db.delete(f"{args[1]}:pgn")
+def _get_pgn_file(update: Update, context: CallbackContext, content: str, match_id: str):
+    update.effective_chat.send_document(
+        content,
+        caption=context.langtable["pgn-file-caption"],
+        filename=f"chess4u-{match_id}.pgn",
+    )
+
+
+def get_pgn_file(update: Update, context, args: list[Union[str, int]]) -> None:
+    raw = context.db.get(f"{args[0]}:pgn")
+    if update.effective_message is not None:
+        update.effective_message.edit_reply_markup()
+
+    if raw is not None:
+        content = gzip.decompress(raw)
+        if update.effective_message is not None:
+            update.effective_message.reply_document(
+                content,
+                caption=context.langtable["pgn-file-caption"],
+                filename=f"chess4u-{args[0]}.pgn",
+            )
+        else:
+            msgurl = base.set_pending_message(
+                context.dispatcher,
+                _get_pgn_file,
+                args=(content, args[0]),
+            )
+            update.callback_query.answer(url=msgurl)
+        context.db.delete(f"{args[0]}:pgn")
     else:
         update.callback_query.answer(
             context.langtable["pgn-fetch-error"], show_alert=True
@@ -54,6 +75,7 @@ def get_pgn_file(update: Update, context, args: List) -> None:
 
 def from_bytes(src: bytes, bot: Bot, id: str) -> "BaseMatch":
     obj = parsers.CGNParser.decode(src)
+    print(obj)
     if "INLINE" in obj["headers"]:
         return GroupMatch._from_cgn(obj, bot, id)
     elif "difficulty" in obj["headers"]["OPTIONS"]:
@@ -68,7 +90,7 @@ class BaseMatch:
 
     def __init__(
         self,
-        bot: Bot = None,
+        dispatcher: Dispatcher = None,
         id: str = None,
         options: dict[str, str] = {},
         date: str = None,
@@ -76,13 +98,17 @@ class BaseMatch:
         self.init_msg_text: Optional[str] = None
         self.is_chess960: bool = options["ruleset"] == "chess960"
         self.options = options
-        self.bot: Bot = bot
-        self.states: list[core.BoardInfo] = [core.BoardInfo.from_fen(utils.STARTPOS)]
+        self.dispatcher: Dispatcher = dispatcher
+        self.states: list[core.BoardInfo] = [core.BoardInfo.init_chess960() if self.is_chess960 else core.BoardInfo.from_fen(utils.STARTPOS)]
         self.result = "*"
         self.date = date or datetime.datetime.now().strftime(utils.DATE_FORMAT)
         self.id: str = id if id else base.create_match_id()
         self.video_filename: str = f"chess4u-{self.id}.mp4"
         self.image_filename: str = f"chess4u-{self.id}.jpg"
+
+    @property
+    def bot(self) -> Bot:
+        return self.dispatcher.bot
 
     def _keyboard(
         self,
@@ -174,11 +200,12 @@ class BaseMatch:
                     black_name=self.db.get_name(self.player2),
                     date=self.date,
                     result=self.result,
-                )
+                ).encode()
             ),
             ex=3600 * 48,
         )
-        if issubclass(self, GroupMatch):
+
+        if isinstance(self, GroupMatch):
             self.msg = self.msg.edit_media(
                 media=new_msg,
                 reply_markup=self._keyboard(
@@ -189,10 +216,10 @@ class BaseMatch:
                         }
                     ],
                     expected_uid=self.players[0].id,
-                    handler_id="MAIN",
+                    handler_id="core",
                 ),
             )
-        elif issubclass(self, PMMatch):
+        elif isinstance(self, PMMatch):
             if self.player_msg:
                 self.player_msg = self.player_msg.edit_media(
                     media=new_msg,
@@ -204,10 +231,10 @@ class BaseMatch:
                             }
                         ],
                         expected_uid=self.players[0].id,
-                        handler_id="MAIN",
+                        handler_id="core",
                     ),
                 )
-            if self.opponent_msg:
+            elif self.opponent_msg:
                 self.opponent_msg = self.opponent_msg.edit_media(
                     media=new_msg,
                     reply_markup=self._keyboard(
@@ -218,11 +245,13 @@ class BaseMatch:
                             }
                         ],
                         expected_uid=self.players[1].id,
-                        handler_id="MAIN",
+                        handler_id="core",
                     ),
                 )
+            else:
+                raise ValueError("shit")
         else:
-            raise ValueError
+            raise ValueError("shit")
 
     def send_analysis_video(self, lang_code: str, state: str) -> None:
         if state in ("checkmate", "resignation"):
@@ -296,15 +325,15 @@ class BaseMatch:
 class GroupMatch(BaseMatch):
     def __init__(
         self,
-        player1: User,
-        player2: User,
-        match_chat: int,
+        player1: User = None,
+        player2: User = None,
+        chat: int = 0,
         msg: Union[Message, base.InlineMessageAdapter] = None,
         **kwargs,
     ):
         self.player1: User = player1
         self.player2: User = player2
-        self.chat_id: int = match_chat
+        self.chat_id: int = chat
         self.msg: Union[Message, base.InlineMessageAdapter] = msg
         super().__init__(**kwargs)
 
@@ -318,8 +347,8 @@ class GroupMatch(BaseMatch):
             headers={
                 "WUID": hex(self.player1.id)[2:],
                 "BUID": hex(self.player2.id)[2:],
-                "CID": hex(self.chat_id)[2:],
-                "MID": hex(self.msg.message_id)[2:],
+                "CID": hex(self.chat_id)[2:] if self.chat_id else "0",
+                "MID": hex(self.msg.message_id)[2:] if isinstance(self.msg, Message) else self.msg.message_id,
                 "MSGTXT": self.init_msg_text,
                 "INLINE": str(int(isinstance(self.msg, base.InlineMessageAdapter))),
                 "OPTIONS": json.dumps(self.options),
@@ -335,34 +364,35 @@ class GroupMatch(BaseMatch):
         )
 
     @classmethod
-    def _from_cgn(cls, obj: dict, bot: Bot, id: str) -> "GroupMatch":
+    def _from_cgn(cls, obj: dict, dispatcher: Dispatcher, id: str) -> "GroupMatch":
         player1 = User(
-            int(obj["headers"]["WUID"], 16), obj["white_name"], False, bot=bot
+            int(obj["headers"]["WUID"], 16), obj["white_name"], False, bot=dispatcher.bot
         )
         player2 = User(
-            int(obj["headers"]["BUID"], 16), obj["black_name"], False, bot=bot
+            int(obj["headers"]["BUID"], 16), obj["black_name"], False, bot=dispatcher.bot
         )
 
         if bool(int(obj["headers"]["INLINE"])):
-            msg = base.InlineMessageAdapter(obj["headers"]["MID"], bot)
+            msg = base.InlineMessageAdapter(obj["headers"]["MID"], dispatcher.bot)
         else:
             msg = Message(
                 obj["headers"]["MID"],
                 datetime.datetime.strptime(obj["date"], utils.DATE_FORMAT),
                 Chat(int(obj["headers"]["CID"], 16, "group")),
-                bot=bot,
+                bot=dispatcher.bot,
             )
 
-        return cls(
+        res = cls(
             player1,
             player2,
             int(obj["headers"]["CID"], 16),
             msg,
             options=json.loads(obj["headers"]["OPTIONS"]),
-            bot=bot,
+            dispatcher=dispatcher,
             id=id,
             date=obj["date"],
         )
+        res.init_msg_text = obj["headers"]["MSGTXT"]
 
     def init_turn(self, move: core.Move = None) -> None:
         super().init_turn(move=move)
@@ -583,10 +613,10 @@ class GroupMatch(BaseMatch):
 class PMMatch(BaseMatch):
     def __init__(
         self,
-        player1: User,
-        player2: User,
-        chat1: int,
-        chat2: int,
+        player1: User = None,
+        player2: User = None,
+        chat1: int = 0,
+        chat2: int = 0,
         msg1: Message = None,
         msg2: Message = None,
         **kwargs,
@@ -607,12 +637,12 @@ class PMMatch(BaseMatch):
             date=self.date,
             result=self.result,
             headers={
-                "WUID": hex(self.player1.id)[2:],
-                "BUID": hex(self.player2.id)[2:],
+                "WUID": "BOT" if self.player1.is_bot else hex(self.player1.id)[2:],
+                "BUID": "BOT" if self.player2.is_bot else hex(self.player2.id)[2:],
                 "CID1": hex(self.chat_id1)[2:],
                 "CID2": hex(self.chat_id2)[2:],
-                "MID1": hex(self.msg1.message_id)[2:],
-                "MID2": hex(self.msg2.message_id)[2:],
+                "MID1": hex(self.msg1.message_id)[2:] if self.msg1 else "0",
+                "MID2": hex(self.msg2.message_id)[2:] if self.msg2 else "0",
                 "MSGTXT": self.init_msg_text,
                 "OPTIONS": json.dumps(self.options),
             },
@@ -657,36 +687,48 @@ class PMMatch(BaseMatch):
         )
 
     @classmethod
-    def _from_cgn(cls, obj: dict, bot: Bot, id: str) -> "PMMatch":
+    def _from_cgn(cls, obj: dict, dispatcher: Dispatcher, id: str) -> "PMMatch":
         date = datetime.datetime.strptime(obj["date"], utils.DATE_FORMAT)
 
-        return cls(
-            User(int(obj["headers"]["WUID"], 16), obj["white_name"], False, bot=bot),
-            User(int(obj["headers"]["BUID"], 16), obj["black_name"], False, bot=bot),
-            int(obj["headers"]["CID1"], 16),
-            int(obj["headers"]["CID2"], 16),
+        res = cls(
+            player1=User(
+                int(obj["headers"]["WUID"], 16), 
+                obj["white_name"], 
+                False,
+                bot=dispatcher.bot
+            ) if obj["headers"]["WUID"] != "BOT" else dispatcher.bot.get_me(),
+            player2=User(
+                int(obj["headers"]["BUID"], 16), 
+                obj["black_name"], 
+                False, 
+                bot=dispatcher.bot
+            ) if obj["headers"]["BUID"] != "BOT" else dispatcher.bot.get_me(),
+            chat1=int(obj["headers"]["CID1"], 16),
+            chat2=int(obj["headers"]["CID2"], 16),
             msg1=Message(
                 int(obj["headers"]["MID1"], 16),
                 date,
                 Chat(int(obj["headers"]["CID1"], 16), "group"),
                 text=obj["headers"]["MSGTXT"],
-                bot=bot,
-            ),
+                bot=dispatcher.bot,
+            ) if obj["headers"]["MID1"] != "0" else None,
             msg2=Message(
                 int(obj["headers"]["MID2"], 16),
                 date,
                 Chat(int(obj["headers"]["CID2"], 16), "group"),
-                bot=bot,
-            ),
+                bot=dispatcher.bot,
+            ) if obj["headers"]["MID2"] != "0" else None,
             options=json.loads(obj["headers"]["OPTIONS"]),
-            bot=bot,
+            dispatcher=dispatcher,
             id=id,
             date=obj["date"],
         )
+        res.init_msg_text = obj["headers"]["MSGTXT"]
+        return res
 
     def init_turn(self, move: core.Move = None, call_parent_method: bool = True):
-        if call_parent_method:
-            super().init_turn(move=move)
+        super().init_turn(move=move)
+
         player, opponent = self.players
         player_chatid, opponent_chatid = self.chat_ids
         player_langtable = base.langtable[player.language_code]
@@ -960,56 +1002,22 @@ class AIMatch(PMMatch):
     }
     EVAL_DEPTH = 18
 
-    def __init__(
-        self, player: User, chat_id: int, options: dict[str, str] = {}, **kwargs
-    ):
-        super().__init__(
-            player, kwargs["bot"].get_me(), chat_id, 0, options=options, **kwargs
-        )
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self.engine = analysis.ChessEngine(self.ENGINE_FILENAME)
-        self.difficulty = options["difficulty"]
+        self.difficulty = self.options["difficulty"]
 
         self.engine.set_move_probabilities(self.DIFF_PRESETS[self.difficulty])
         self.engine["UCI_Chess960"] = self.is_chess960
 
-    def __bytes__(self) -> bytes:
-        return parsers.CGNParser.encode(
-            self.states,
-            white_name=self.db.get_name(self.player1),
-            date=self.date,
-            result=self.result,
-            headers={
-                "WUID": hex(self.player1.id)[2:],
-                "CID": hex(self.chat_id1)[2:],
-                "MID": hex(self.msg1.message_id)[2:],
-                "MSGTXT": self.init_msg_text,
-                "OPTIONS": json.dumps(self.options),
-            },
-        )
-
-    @classmethod
-    def _from_cgn(cls, obj: dict, bot: Bot, id: str) -> "AIMatch":
-        date = datetime.datetime.strptime(obj["date"], utils.DATE_FORMAT)
-
-        return cls(
-            User(int(obj["headers"]["WUID"], 16), obj["white_name"], False, bot=bot),
-            int(obj["headers"]["CID"], 16),
-            msg1=Message(
-                int(obj["headers"]["MID"], 16),
-                date,
-                Chat(int(obj["headers"]["CID"], 16), "group"),
-                text=obj["headers"]["MSGTXT"],
-                bot=bot,
-            ),
-            options=json.loads(obj["headers"]["OPTIONS"]),
-            bot=bot,
-            id=id,
-            date=obj["date"],
-        )
-
     def init_turn(self, move: core.Move = None, **kwargs) -> None:
-        super().init_turn(move=move, **kwargs)
-        if move:
+        if move is None:
+            if self.player1.is_bot:
+                super().init_turn(self.engine.get_move(self.states[-1], self.EVAL_DEPTH))
+            elif self.player2.is_bot:
+                super().init_turn(**kwargs)
+        else:
+            super().init_turn(move=move, **kwargs)
             return super().init_turn(
                 self.engine.get_move(self.states[-1], self.EVAL_DEPTH)
             )

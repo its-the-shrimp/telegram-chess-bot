@@ -24,6 +24,7 @@
         "error-popup-msg": "Error",
         "error-msg": "An unknown error occured. The developers are notified and the error will be fixed soon.",
         "unexpected-uid": "It is not your turn!",
+        "pgn-sent-in-dms": "Game record is sent to your DMs",
         "pgn-file-caption": "Game record in PGN format",
         "pgn-fetch-error": "Game not found or outdated.",
         "anonmode-off": "Anonymous mode is off",

@@ -2,7 +2,7 @@ import io
 import queue
 import os
 import json
-from typing import Callable, Optional
+from typing import Optional
 import telegram as tg
 import chess as core
 import bot_utils
@@ -16,16 +16,10 @@ import time
 debug_env_path = os.path.join(os.path.dirname(__file__), "debug_env.json")
 INLINE_OPTION_PATTERN = re.compile(r"\w+:\d")
 IS_DEBUG = os.path.exists(debug_env_path)
-TelegramCallback = Callable[[tg.Update, bot_utils.BoardGameContext], None]
 
 bot_utils.BoardGameContext.menu = bot_utils.MenuFormatter.from_dict(core.OPTIONS)
-if IS_DEBUG:
-    with open(debug_env_path) as r:
-        os.environ.update(json.load(r))
 logging.basicConfig(
-    format="{levelname} {name}: {message}",
-    style="{",
-    level=logging.DEBUG
+    format="{levelname} {name}: {message}", style="{", level=logging.DEBUG
 )
 
 try:
@@ -34,8 +28,8 @@ except FileExistsError:
     pass
 
 
-group_thread = tg.ext.DelayQueue()
-pm_thread = tg.ext.DelayQueue()
+class TelegramBotApp(flask.Flask):
+    dispatcher: tg.ext.Dispatcher
 
 
 def get_opponent(queue: list[dict], options: dict) -> Optional[dict]:
@@ -44,7 +38,7 @@ def get_opponent(queue: list[dict], options: dict) -> Optional[dict]:
             return queuepoint
 
 
-def _tg_adapter(f: TelegramCallback) -> TelegramCallback:
+def _tg_adapter(f: core.TelegramCallback) -> core.TelegramCallback:
     def decorated(update: tg.Update, context: bot_utils.BoardGameContext):
         try:
             return f(update, context)
@@ -53,16 +47,21 @@ def _tg_adapter(f: TelegramCallback) -> TelegramCallback:
 
     return decorated
 
-def tg_adapter(f: TelegramCallback) -> TelegramCallback:
+
+def tg_adapter(f: core.TelegramCallback) -> core.TelegramCallback:
     def decorated(update: tg.Update, context: bot_utils.BoardGameContext):
 
         if getattr(update.effective_chat, "type", tg.Chat.PRIVATE) in (
             tg.Chat.PRIVATE,
             tg.Chat.SENDER,
         ):
-            pm_thread._queue.put((_tg_adapter(f), (update, context), {}))
+            context.bot_data["group_thread"]._queue.put(
+                (_tg_adapter(f), (update, context), {})
+            )
         else:
-            group_thread._queue.put((_tg_adapter(f), (update, context), {}))
+            context.bot_data["pm_thread"]._queue.put(
+                (_tg_adapter(f), (update, context), {})
+            )
 
     return decorated
 
@@ -77,13 +76,17 @@ def error_handler(update: tg.Update, context: bot_utils.BoardGameContext):
                 text="Ошибка: несколько программ подключены к одному боту",
             )
         else:
-            tb = traceback.format_exc(limit=10) + "\n\n" + json.dumps(update.to_dict(), indent=2)
+            tb = (
+                traceback.format_exc(limit=10)
+                + "\n\n"
+                + json.dumps(update.to_dict(), indent=2)
+            )
             tb = tb[max(0, len(tb) - tg.constants.MAX_MESSAGE_LENGTH) :]
 
             context.bot.send_message(
-                chat_id=os.environ["CREATOR_ID"], 
+                chat_id=os.environ["CREATOR_ID"],
                 text=tb,
-                entities=[tg.MessageEntity(tg.MessageEntity.PRE, 0, len(tb))]
+                entities=[tg.MessageEntity(tg.MessageEntity.PRE, 0, len(tb))],
             )
 
         if IS_DEBUG and not isinstance(err, tg.error.Unauthorized):
@@ -92,12 +95,22 @@ def error_handler(update: tg.Update, context: bot_utils.BoardGameContext):
 
 @tg_adapter
 def start(update: tg.Update, context: bot_utils.BoardGameContext):
-    update.effective_chat.send_message(text=context.langtable["start-msg"])
+    if context.args:
+        if context.args[0].startswith("pmid"):
+            pmsg_id = context.args[0].removeprefix("pmid")
+            pm = context.db.get_pending_message(pmsg_id)
+            if pm is not None:
+                pm[0](update, context, *pm[1])
+            elif "pm_expire_hook" in context.bot_data:
+                context.bot_data["pm_expire_hook"](update, context)
+    else:
+        update.effective_chat.send_message(text=context.langtable["start-msg"])
+
 
 @tg_adapter
 def unknown(update: tg.Update, context: bot_utils.BoardGameContext):
     if not update.effective_message.text.isascii():
-        return 
+        return
 
     ratios = []
     d = difflib.SequenceMatcher(a=update.effective_message.text)
@@ -126,7 +139,7 @@ def settings(update: tg.Update, context: bot_utils.BoardGameContext):
                         callback_data=core.format_callback_data(
                             "ANON_MODE_OFF" if is_anon else "ANON_MODE_ON",
                             handler_id="MAIN",
-                            expected_uid=update.effective_user.id
+                            expected_uid=update.effective_user.id,
                         ),
                     )
                 ]
@@ -146,7 +159,7 @@ def boardgame_menu(update: tg.Update, context: bot_utils.BoardGameContext) -> No
 @tg_adapter
 def send_invite_inline(update: tg.Update, context: bot_utils.BoardGameContext) -> None:
     logging.info(f"Handling inline query: {update.inline_query.query}")
-    
+
     options = context.menu.tg_decode(update.inline_query.query)
     challenge_desc = context.menu.prettify(options, update.effective_user.language_code)
 
@@ -169,9 +182,7 @@ def send_invite_inline(update: tg.Update, context: bot_utils.BoardGameContext) -
                             tg.InlineKeyboardButton(
                                 text=context.langtable["accept-button"],
                                 callback_data=core.format_callback_data(
-                                    "ACCEPT",
-                                    [match_id],
-                                    handler_id="MAIN"
+                                    "ACCEPT", [match_id], handler_id="MAIN"
                                 ),
                             )
                         ]
@@ -231,7 +242,7 @@ def button_callback(
                                 callback_data=core.format_callback_data(
                                     "ANON_MODE_ON",
                                     expected_uid=update.effective_user.id,
-                                    handler_id="MAIN"
+                                    handler_id="MAIN",
                                 ),
                             )
                         ]
@@ -256,8 +267,7 @@ def button_callback(
                                 callback_data=core.format_callback_data(
                                     "ANON_MODE_OFF",
                                     handler_id="MAIN",
-                                    expected_uid=update.effective_user.id
-
+                                    expected_uid=update.effective_user.id,
                                 ),
                             )
                         ]
@@ -300,7 +310,7 @@ def button_callback(
                     except StopIteration:
                         options[key] = values[0]
                     break
-            
+
             if len(values) > 1:
                 update.effective_message.edit_reply_markup(
                     context.menu.encode(update.effective_user, indexes=options)
@@ -318,10 +328,11 @@ def button_callback(
             if options["mode"] == "vsbot":
                 update.effective_message.edit_text(context.langtable["match-found"])
                 new = core.AIMatch(
-                    update.effective_user,
-                    update.effective_chat.id,
+                    player1=update.effective_user,
+                    player2=context.bot.get_me(),
+                    chat1=update.effective_chat.id,
                     options=options,
-                    bot=context.bot,
+                    dispatcher=context.dispatcher,
                 )
                 context.bot_data["matches"][new.id] = new
                 new.init_turn()
@@ -335,20 +346,20 @@ def button_callback(
 
                     if opponent["chat_id"] == update.effective_chat.id:
                         new = core.GroupMatch(
-                            opponent["user"],
-                            update.effective_user,
-                            opponent["chat_id"],
+                            player1=opponent["user"],
+                            player2=update.effective_user,
+                            chat=opponent["chat_id"],
                             options=options,
-                            bot=context.bot,
+                            dispatcher=context.dispatcher,
                         )
                     else:
                         new = core.PMMatch(
-                            opponent["user"],
-                            update.effective_user,
-                            opponent["chat_id"],
-                            update.effective_chat.id,
+                            player1=opponent["user"],
+                            player2=update.effective_user,
+                            chat1=opponent["chat_id"],
+                            chat2=update.effective_chat.id,
                             options=options,
-                            bot=context.bot,
+                            dispatcher=context.dispatcher,
                         )
                     context.bot_data["matches"][new.id] = new
                     new.init_turn()
@@ -362,11 +373,15 @@ def button_callback(
                         }
                     )
                     update.effective_message.edit_text(
-                        "\n".join([
-                            context.langtable["awaiting-opponent"],
-                            "",
-                            context.menu.prettify(options, update.effective_user.language_code)
-                        ]),
+                        "\n".join(
+                            [
+                                context.langtable["awaiting-opponent"],
+                                "",
+                                context.menu.prettify(
+                                    options, update.effective_user.language_code
+                                ),
+                            ]
+                        ),
                         reply_markup=tg.InlineKeyboardMarkup(
                             [
                                 [
@@ -375,7 +390,7 @@ def button_callback(
                                         callback_data=core.format_callback_data(
                                             "CANCEL",
                                             handler_id="MAIN",
-                                            expected_uid=update.effective_user.id
+                                            expected_uid=update.effective_user.id,
                                         ),
                                     )
                                 ]
@@ -409,7 +424,7 @@ def button_callback(
                         update.callback_query.inline_message_id, context.bot
                     ),
                     options=challenge["options"],
-                    bot=context.bot,
+                    dispatcher=context.dispatcher,
                 )
                 context.bot_data["matches"][new.id] = new
                 new.init_turn()
@@ -419,11 +434,18 @@ def button_callback(
                     text=context.langtable["error-msg"],
                 )
 
+        else:
+            raise ValueError(
+                f"unknown command {args['command']} for handler {args['target_id']}"
+            )
+
     elif args["target_id"] == "core":
         core.KEYBOARD_BUTTONS[args["command"]](update, context, args["args"])
     else:
         if context.bot_data["matches"].get(args["target_id"]):
-            res = context.bot_data["matches"][args["target_id"]].handle_input(args["command"], args["args"])
+            res = context.bot_data["matches"][args["target_id"]].handle_input(
+                args["command"], args["args"]
+            )
             res = res if res else (None, False)
             if context.bot_data["matches"][args["target_id"]].result != "*":
                 del context.bot_data["matches"][args["target_id"]]
@@ -434,27 +456,31 @@ def button_callback(
 
 def create_app() -> flask.Flask:
     dispatcher = tg.ext.Dispatcher(
-        tg.Bot(
-            os.environ["BOT_TOKEN"],
-            defaults=tg.ext.Defaults(quote=True)
-        ),
+        tg.Bot(os.environ["BOT_TOKEN"], defaults=tg.ext.Defaults(quote=True)),
         queue.Queue(),
         context_types=tg.ext.ContextTypes(context=bot_utils.BoardGameContext),
     )
     conn = bot_utils.RedisInterface.from_url(os.environ["REDISCLOUD_URL"])
-    dispatcher.bot_data.update({"matches": {}, "queue": [], "challenges": {}})
-    for id, gamedata in conn._fetch_matches(core.from_bytes, dispatcher.bot):
-        dispatcher.bot_data["matches"][id] = core.from_bytes(gamedata, dispatcher.bot, id)
-
     core.init(IS_DEBUG, conn)
+
+    dispatcher.bot_data.update(
+        {
+            "matches": {},
+            "queue": [],
+            "challenges": {},
+            "conn": conn,
+            "group_thread": tg.ext.DelayQueue(),
+            "pm_thread": tg.ext.DelayQueue(burst_limit=20),
+        }
+    )
+    for id, match in conn._fetch_matches(core.from_bytes, dispatcher):
+        dispatcher.bot_data["matches"][id] = match
 
     dispatcher.add_handler(tg.ext.InlineQueryHandler(send_invite_inline))
     dispatcher.add_handler(tg.ext.ChosenInlineResultHandler(create_invite))
     dispatcher.add_handler(tg.ext.CallbackQueryHandler(button_callback))
     dispatcher.add_handler(tg.ext.CommandHandler("start", start))
-    dispatcher.add_handler(
-        tg.ext.CommandHandler(core.__name__, boardgame_menu)
-    )
+    dispatcher.add_handler(tg.ext.CommandHandler(core.__name__, boardgame_menu))
     dispatcher.add_handler(tg.ext.CommandHandler("settings", settings))
     dispatcher.add_handler(
         tg.ext.MessageHandler(tg.ext.filters.Filters.regex("^/"), unknown)
@@ -473,7 +499,9 @@ def create_app() -> flask.Flask:
         start = time.monotonic_ns()
         dispatcher.process_update(tg.Update.de_json(flask.request.json, dispatcher.bot))
         end = time.monotonic_ns()
-        logging.info(f"Handled update #{flask.request.json['update_id']} in {(end - start) // 1000000} ms")
+        logging.info(
+            f"Handled update #{flask.request.json['update_id']} in {(end - start) // 1000000} ms"
+        )
         return "<p>True</p>"
 
     def fetch_dynamic(filename):
@@ -484,32 +512,28 @@ def create_app() -> flask.Flask:
 
     def fetch_static(filename):
         return flask.send_file(
-            os.path.join("images", "static", filename), 
-            download_name=filename
+            os.path.join("images", "static", filename), download_name=filename
         )
 
-    app.add_url_rule(f"/{os.environ['BOT_TOKEN']}/dynamic/<filename>", view_func=fetch_dynamic)
-    app.add_url_rule(f"/{os.environ['BOT_TOKEN']}/static/<filename>", view_func=fetch_static)
-    app.add_url_rule(f"/{os.environ['BOT_TOKEN']}/send-update", view_func=process_update, methods=["POST"])
-    dispatcher.bot.set_webhook("/".join([os.environ["HOST_URL"], os.environ["BOT_TOKEN"], "send-update"]))
+    app.add_url_rule(
+        f"/{os.environ['BOT_TOKEN']}/dynamic/<filename>", view_func=fetch_dynamic
+    )
+    app.add_url_rule(
+        f"/{os.environ['BOT_TOKEN']}/static/<filename>", view_func=fetch_static
+    )
+    app.add_url_rule(
+        f"/{os.environ['BOT_TOKEN']}/send-update",
+        view_func=process_update,
+        methods=["POST"],
+    )
+    dispatcher.bot.set_webhook(
+        "/".join([os.environ["HOST_URL"], os.environ["BOT_TOKEN"], "send-update"])
+    )
     dispatcher.bot.send_message(chat_id=os.environ["CREATOR_ID"], text="Бот включен")
 
-    if IS_DEBUG:
-        return app, dispatcher
-    else:
-        return app
+    app.dispatcher = dispatcher
+    return app
 
 
 if __name__ == "__main__":
-    from pyngrok import ngrok
-
-    os.environ["HOST_URL"] = ngrok.connect(addr="4096").public_url.replace("http://", "https://")
-    
-    app, dispatcher = create_app()
-    app.run(host="localhost", port=4096)
-
-    logging.info("Server shutting down...")
-    conn = bot_utils.RedisInterface()
-    conn._flush_matches(dispatcher.bot_data["matches"])
-    group_thread.stop()
-    pm_thread.stop()
+    os.system("gunicorn 'main:create_app()'")
