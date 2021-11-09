@@ -2,9 +2,9 @@ import subprocess
 import random
 import itertools
 import functools
-from typing import Union
+from typing import Union, overload
 from .utils import BoardPoint
-from .core import Move, BoardInfo, BasePiece, King
+from .core import Move, BoardInfo, King, MoveEval
 
 IDEAL_N_CTRL_POS = {
     "Pawn": 2,
@@ -20,7 +20,7 @@ def decode_engine_move(raw: str, board: BoardInfo) -> Move:
     return Move.from_piece(
         board[BoardPoint(raw[:2])],
         BoardPoint(raw[2:4]),
-        new_piece=raw[4] if len(raw) == 5 else "",
+        new_piece=BoardInfo.FENSYMBOLS[raw[4]] if len(raw) == 5 else None,
     )
 
 
@@ -156,33 +156,72 @@ def eval_position_exp(board: BoardInfo) -> float:
     return round((defense_score + activity_score) / 2, 2)
 
 
-def _parse_response(src: str) -> dict:
-    formatted = (
-        src.removeprefix("info ").replace("cp ", "cp#").replace("mate ", "mate#")
-    )
-    tokens = formatted.split(" ")
-    res = dict(
-        zip(tokens[: tokens.index("pv") : 2], tokens[1 : tokens.index("pv") : 2])
-    )
+class EvalScore:
+    comparison_map = {
+        (1, 1): True,
+        (1, 0): True,
+        (1, -1): False,
+        (0, 1): False,
+        (0, 0): None,
+        (0, -1): True,
+        (-1, 1): True,
+        (-1, 0): False,
+        (-1, -1): False
+    }
 
-    res["pv"] = tokens[tokens.index("pv") + 1 :]
-    if "cp" in res["score"]:
-        res["score"] = int(res["score"][3:]) / 100
-    elif "mate" in res["score"]:
-        res["score"] = (
-            ("-" if "-" in res["score"] else "")
-            + "M"
-            + res["score"][5:].replace("-", "")
+    @overload
+    def __init__(self, eval_score: float, is_white_side: bool):
+        ...
+
+    @overload
+    def __init__(self, mate_in: int, is_white_side: bool):
+        ...
+
+    def __init__(self, arg, is_white_side: bool):
+        if isinstance(arg, int):
+            self.score = 0.0
+            self.mate_in = arg
+        elif isinstance(arg, float):
+            self.score = arg
+            self.mate_in = 0
+
+        self.is_white_side = is_white_side
+
+    def __str__(self):
+        if self.mate_in != 0:
+            return ("+" if self.mate_in > 0 else "") + f"M{self.mate_in}"
+        else:
+            return ("+" if self.score > 0 else "") + f"{self.score:.2f}"
+
+    def __repr__(self):
+        return f"<EvalScore({self.__str__()})>"
+
+    def __eq__(self, other: "EvalScore"):
+        if self.__class__ != other.__class__:
+            return NotImplemented
+        return self.score == other.score and self.mate_in == other.mate_in
+
+    def __compare(self, other: "EvalScore", side: bool):
+        if self.__class__ != other.__class__:
+            return NotImplemented
+        
+        comp = (
+            round((self.score - other.score) / abs(self.score - other.score or 1)),
+            (self.mate_in - other.mate_in) // abs(self.mate_in - other.mate_in or 1)
         )
 
-    for key in res:
-        if type(res[key]) == str and res[key].isdigit():
-            res[key] = int(res[key])
-    return res
+        res = self.comparison_map[tuple(comp)]
+        return res == side if res is not None else False
+
+    def __gt__(self, other: "EvalScore"):
+        return self.__compare(other, self.is_white_side)
+
+    def __lt__(self, other: "EvalScore"):
+        return self.__compare(other, not self.is_white_side)
 
 
 class ChessEngine:
-    def __init__(self, path):
+    def __init__(self, path, default_eval_depth: int = None):
         self._process = subprocess.Popen(
             path,
             bufsize=1,
@@ -193,17 +232,44 @@ class ChessEngine:
             stderr=subprocess.PIPE,
         )
         self._process.stdout.readline()
+        self.default_eval_depth = default_eval_depth
         self.move_probabilities: tuple[int] = (0,)
         self.options = {}
+        self["multiPV"] = 3
 
     def __hash__(self):
         return self._process.pid
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: str, value: Union[str, int, bool]):
         self.options[key] = value
         self._input(
             f"setoption name {key} value {str(value).lower() if isinstance(value, bool) else value}\n"
         )
+
+    def __getitem__(self, key: str):
+        return self.options[key]
+
+    @staticmethod
+    def _parse_response(src: str, is_white: bool) -> dict:
+        formatted = (
+            src.removeprefix("info ").replace("cp ", "cp#").replace("mate ", "mate#")
+        )
+        tokens = formatted.split(" ")
+        res = dict(
+            zip(tokens[: tokens.index("pv") : 2], tokens[1 : tokens.index("pv") : 2])
+        )
+        res["pv"] = tokens[tokens.index("pv") + 1 :]
+
+        for key in res:
+            if isinstance(res[key], str) and res[key].isdigit():
+                res[key] = int(res[key])
+
+        eval_type, eval_score = res["score"].split("#")
+        res["score"] = EvalScore(int(eval_score) / 100 if eval_type=="cp" else int(eval_score), is_white)
+        res["score"].score *= 1 if is_white else -1
+        res["score"].mate_in *= 1 if is_white else -1
+
+        return res
 
     def _input(self, cmd: str) -> None:
         self._process.stdin.write(cmd)
@@ -211,13 +277,13 @@ class ChessEngine:
 
     def set_move_probabilities(self, values: tuple[int]) -> None:
         self.move_probabilities = values
-        self["MultiPV"] = max(values) + 1
 
     def get_moves(
-        self, board: BoardInfo, depth: int, **kwargs
+        self, board: BoardInfo, depth: int = None, **kwargs
     ) -> list[dict[str, Union[str, int, float, list[Move]]]]:
+        depth = depth or self.default_eval_depth
         self._input(
-            f"position fen {board.fen}\ngo depth {depth} { ' '.join([f'{k} {v}' for k, v in kwargs.items()]) }\n"
+            f"position fen {board.get_fen()}\ngo depth {depth} { ' '.join([f'{k} {v}' for k, v in kwargs.items()]) }\n"
         )
         self._process.stdout.readline()
         results = []
@@ -228,20 +294,11 @@ class ChessEngine:
             elif "currmove" in line:
                 continue
             elif " depth" in line:
-                parsed = _parse_response(line[:-1])
+                parsed = self._parse_response(line[:-1], board.is_white_turn)
                 if (
                     parsed["multipv"] not in [i["multipv"] for i in results]
                     and parsed["depth"] == depth
                 ):
-                    if not board.is_white_turn:
-                        if isinstance(parsed["score"], str):
-                            parsed["score"] = (
-                                parsed["score"].replace("-", "")
-                                if "-" in parsed["score"]
-                                else "-" + parsed["score"]
-                            )
-                        else:
-                            parsed["score"] *= -1
                     results.append(parsed)
 
         filtered = [i for i in results if i["depth"] == depth]
@@ -263,27 +320,23 @@ class ChessEngine:
         res = self.get_moves(*args, **kwargs)
         return res[random.choice(self.move_probabilities)]["pv"][0]
 
-    def eval_position_static(self, board: BoardInfo) -> float:
-        self._process.stdin.write(f"position fen {board.fen}\neval\n")
+    def eval_position_static(self, board: BoardInfo) -> EvalScore:
+        self._process.stdin.write(f"position fen {board.get_fen()}\neval\n")
         for line in self._process.stdout:
             if "Final evaluation" in line:
-                return float(line.split()[2])
+                return EvalScore(float(line.split()[2]), board.is_white_turn)
 
     @functools.lru_cache(maxsize=32)
-    def eval_position(self, move: Move, depth: int) -> Union[float, str]:
+    def eval_position(self, move: Move, depth: int = None) -> EvalScore:
         res = self.get_moves(move.board, depth, searchmoves=encode_engine_move(move))
         return res[0]["score"]
 
-    def eval_move(self, move: Move, depth: int, prev_move: Move = None) -> str:
+    def eval_move(self, move: Move, depth: int = None, prev_move: Move = None) -> tuple[MoveEval, Move, EvalScore]:
         n_moves = 0
         for piece in move.board.whites if move.is_white else move.board.blacks:
-            possible_moves = [move for move in piece.get_moves() if move.is_legal()]
-            n_moves += len(possible_moves)
+            n_moves += len(piece.get_moves())
         if n_moves == 1:
-            return "□"
-
-        if move == self.get_moves(move.board, depth)[0]["pv"][0]:
-            return "!!!"
+            return (MoveEval.FORCED, move)
 
         if prev_move:
             prev_eval = self.eval_position(prev_move, depth)
@@ -291,32 +344,58 @@ class ChessEngine:
             prev_eval = self.eval_position_static(move.board)
         cur_eval = self.eval_position(move, depth)
 
-        if type(prev_eval) == str and type(cur_eval) == str:
-            if int(prev_eval[-1]) > int(cur_eval[-1]):
-                return "!!" if "-" in prev_eval == move.is_white else "??"
-            elif int(prev_eval[-1]) < int(cur_eval[-1]):
-                return "??" if "-" in prev_eval == move.is_white else "!!"
-            else:
-                return "!"
-        elif type(prev_eval) == str:
-            if "-" in prev_eval == move.is_white:
-                return "!!"
-            else:
-                return "??"
-        elif type(cur_eval) == str:
-            if "-" in cur_eval != move.is_white:
-                return "??"
-            else:
-                return "!!"
-
-        eval_coef = (cur_eval - prev_eval) * (1 if move.is_white else -1)
-        if eval_coef >= 1.0:
-            return "!!"
-        elif 0.0 <= eval_coef < 1.0:
-            return "!"
-        elif -1.0 <= eval_coef < 0.0:
-            return "?!"
-        elif -2.0 <= eval_coef < -1.0:
-            return "?"
+        best_line, second_best_line, _ = self.get_moves(move.board, depth)
+        if move == best_line["pv"][0]:
+            mark = MoveEval.PRECISE if second_best_line["score"] < prev_eval else MoveEval.BEST
+        
         else:
-            return "??"
+            comp = (
+                round((cur_eval.score - prev_eval.score) / abs(cur_eval.score - prev_eval.score or 1)),
+                (cur_eval.mate_in - prev_eval.mate_in) // abs(cur_eval.mate_in - prev_eval.mate_in or 1)
+            )
+            mark = MoveEval.GOOD
+
+            if comp[0] == comp[1] != 0:   #    (1, 1) or (-1, -1)
+                mark = MoveEval.GREAT if cur_eval.is_white_side == (comp[0] > 0) else MoveEval.BLUNDER
+            elif comp == (0, 1):
+                if cur_eval.is_white_side:
+                    if prev_eval.mate_in < 0 and cur_eval.mate_in > 0:
+                        mark = MoveEval.GREAT
+                    elif prev_eval.mate_in + cur_eval.mate_in < 0 and abs(prev_eval.mate_in - cur_eval.mate_in) >= 5:
+                        mark = MoveEval.BLUNDER
+                    else:
+                        mark = MoveEval.MISTAKE
+                else:
+                    if prev_eval.mate_in < 0 and cur_eval.mate_in > 0:
+                        mark = MoveEval.BLUNDER
+                    else:
+                        mark = MoveEval.GREAT
+            elif comp[0] * comp[1] == -1: #     (-1, 1) or (1, -1)
+                if (comp[0] > 0) != cur_eval.is_white_side:
+                    mark = MoveEval.GREAT
+                elif cur_eval.mate_in != 0:
+                    mark = MoveEval.BLUNDER
+                else:
+                    mark = MoveEval.MISTAKE
+            elif comp[0] != 0 and comp[1] == 0:  #   (-1, 0) or (1, 0)
+                if abs(prev_eval.score - cur_eval.score) > 0.5:
+                    mark = MoveEval.GREAT if cur_eval.is_white_side == prev_eval.score > cur_eval.score else MoveEval.MISTAKE
+                else:
+                    mark = MoveEval.GOOD if cur_eval.is_white_side == prev_eval.score > cur_eval.score else MoveEval.WEAK
+            elif comp == (0, -1):
+                if not cur_eval.is_white_side:
+                    if prev_eval.mate_in > 0 and cur_eval.mate_in < 0:
+                        mark = MoveEval.GREAT
+                    elif prev_eval.mate_in + cur_eval.mate_in < 0 and abs(prev_eval.mate_in - cur_eval.mate_in) >= 5:
+                        mark = MoveEval.BLUNDER
+                    else:
+                        mark = MoveEval.MISTAKE
+                else:
+                    if prev_eval.mate_in > 0 and cur_eval.mate_in < 0:
+                        mark = MoveEval.BLUNDER
+                    else:
+                        mark = MoveEval.GREAT
+
+        print(second_best_line)
+        return mark, best_line["pv"][0], best_line["score"]
+            

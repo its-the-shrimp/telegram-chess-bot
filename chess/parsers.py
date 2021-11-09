@@ -1,14 +1,7 @@
-from datetime import datetime
 import re
-from typing import Generator, Iterable
-from .core import *
-from .utils import DATE_FORMAT
-
-
-DRAW = "1/2-1/2"
-WHITE_WIN = "1-0"
-BLACK_WIN = "0-1"
-NOT_FINISHED = "*"
+from typing import Generator, Iterable, Optional
+from .core import BoardInfo, Move, GameState
+from .utils import _reversed, STARTPOS
 
 
 def get_moves(boards: list["BoardInfo"]) -> Generator["Move", None, None]:
@@ -17,30 +10,58 @@ def get_moves(boards: list["BoardInfo"]) -> Generator["Move", None, None]:
 
 
 class PGNParser:
+    RESULT_CODES = {
+        GameState.NORMAL: "*",
+        GameState.CHECK: "*",
+        GameState.ABORTED: "*",
+        GameState.WHITE_CHECKMATED: "0-1",
+        GameState.BLACK_CHECKMATED: "1-0",
+        GameState.WHITE_RESIGNED: "0-1",
+        GameState.BLACK_RESIGNED: "1-0",
+        GameState.DRAW: "1/2-1/2",
+        GameState.FIFTY_MOVE_DRAW: "1/2-1/2",
+        GameState.INSUFFIECENT_MATERIAL_DRAW: "1/2-1/2",
+        GameState.STALEMATE_DRAW: "1/2-1/2",
+        GameState.THREEFOLD_REPETITION_DRAW: "1/2-1/2",
+    }
+
     @classmethod
     def decode_moveseq(
         cls, src: str, startpos: str = STARTPOS
-    ) -> tuple[list["BoardInfo"], str]:
-        states = [BoardInfo.from_fen(startpos)]
-        *moves, result = src.replace("\n", " ").split()
+    ) -> tuple[list["BoardInfo"], GameState]:
+        boards = [BoardInfo.from_fen(startpos)]
+        *_moves, _result = src.replace("\n", " ").split()
 
-        result = DRAW if result in [".5-.5", "0.5-0.5"] else result
-        if result not in [NOT_FINISHED, DRAW, WHITE_WIN, BLACK_WIN]:
-            moves.append(result)
-            result = NOT_FINISHED
-
-        for token in moves:
+        for token in _moves:
             if not (token[:-1].isdigit() and token[-1] == "."):
-                states.append(states[-1] + Move.from_pgn(token, states[-1]))
+                boards.append(boards[-1] + Move.from_pgn(token, boards[-1]))
 
-        return states, result
+        if _result in ("1/2-1/2", ".5-.5", "0.5-0.5"):
+            result = GameState.DRAW
+        if _result in ("1-0", "0-1"):
+            if "#" in _moves[-1] or "++" in _moves[-1]:
+                result = (
+                    GameState.WHITE_CHECKMATED
+                    if boards[-1].is_white_turn
+                    else GameState.BLACK_CHECKMATED
+                )
+            else:
+                result = (
+                    GameState.WHITE_RESIGNED
+                    if boards[-1].is_white_turn
+                    else GameState.BLACK_RESIGNED
+                )
+        else:
+            result = GameState.CHECK if "+" in _moves[-1] else GameState.NORMAL
+
+        return boards, result
 
     @classmethod
     def encode_moveseq(
         cls,
         moves: list["Move"] = None,
         positions: Iterable["BoardInfo"] = None,
-        result: str = "*",
+        result: Optional[GameState] = GameState.NORMAL,
         language_code: str = "en",
         line_length=80,
         turns_per_line=None,
@@ -57,7 +78,7 @@ class PGNParser:
         if line_length:
             encoded = ""
             cur_line = ""
-            for token in res + ([result] if result is not None else []):
+            for token in res + ([cls.RESULT_CODES[result]] if result is not None else []):
                 if any(
                     [
                         line_length and len(cur_line + " " + token) > line_length,
@@ -83,10 +104,10 @@ class PGNParser:
             res["headers"][_key[1:]] = _value[1:-2]
         res["white_name"] = res["headers"]["White"]
         res["black_name"] = res["headers"]["Black"]
-        res["date"] = datetime.strptime(res["headers"]["Date"], DATE_FORMAT)
+        res["date"] = res["headers"]["Date"]
         del res["headers"]["Date"], res["headers"]["White"], res["headers"]["Black"]
 
-        res["states"], res["result"] = cls.decode_moveseq(
+        res["boards"], res["result"] = cls.decode_moveseq(
             moves, startpos=res["headers"].get("FEN", STARTPOS)
         )
         for key in ["FEN", "Result"]:
@@ -97,23 +118,23 @@ class PGNParser:
     @classmethod
     def encode(
         cls,
-        states: Iterable["BoardInfo"] = [],
+        boards: Iterable["BoardInfo"] = [],
         white_name: str = "?",
         black_name: str = "?",
-        date: str = None,
-        result: str = NOT_FINISHED,
+        date: str = "?",
+        result: GameState = GameState.NORMAL,
         headers: dict[str, str] = {},
     ):
         std_headers = {
             "Event": "Online Chess on Telegram",
             "Site": "t.me/real_chessbot",
-            "Date": date or "?",
+            "Date": date,
             "Round": "-",
             "White": white_name,
             "Black": black_name,
             "Result": result,
         }
-        startpos = states[0].fen
+        startpos = boards[0].get_fen()
         if startpos != STARTPOS:
             std_headers["FEN"] = startpos
         headers = std_headers | headers
@@ -122,13 +143,25 @@ class PGNParser:
             [
                 "\n".join([f'[{k} "{v}"]' for k, v in headers.items()]),
                 "",
-                cls.encode_moveseq(get_moves(states), result=result),
+                cls.encode_moveseq(positions=boards, result=result),
             ]
         )
 
 
 class CGNParser:
-    RESULT_CODES = {DRAW: b"D", WHITE_WIN: b"W", BLACK_WIN: b"B", NOT_FINISHED: b"*"}
+    RESULT_CODES = {
+        GameState.NORMAL: b"*",
+        GameState.CHECK: b"+",
+        GameState.WHITE_CHECKMATED: b"WC",
+        GameState.BLACK_CHECKMATED: b"BC",
+        GameState.WHITE_RESIGNED: b"WR",
+        GameState.BLACK_RESIGNED: b"BR",
+        GameState.DRAW: b"AD",
+        GameState.FIFTY_MOVE_DRAW: b"FMD",
+        GameState.INSUFFIECENT_MATERIAL_DRAW: b"IMD",
+        GameState.STALEMATE_DRAW: b"SD",
+        GameState.THREEFOLD_REPETITION_DRAW: b"TRD",
+    }
     SPECIAL_CHARS = {"##": "#", "#N": "\n", "#T": "\t"}
 
     @classmethod
@@ -147,34 +180,36 @@ class CGNParser:
         data["date"] = (
             data["headers"][b"D"].decode() if b"D" in data["headers"] else None
         )
-        data["result"] = {v: k for k, v in cls.RESULT_CODES.items()}[
-            data["headers"].get(b"R", NOT_FINISHED)
-        ]
+        data["result"] = _reversed(cls.RESULT_CODES)[data["headers"].get(b"R", b"*")]
 
-        data["states"] = [
+        data["boards"] = [
             BoardInfo.from_fen(data["headers"].get(b"S", STARTPOS.encode()).decode())
         ]
         for move in zip(data["headers"][b"M"][::2], data["headers"][b"M"][1::2]):
-            data["states"].append(
-                data["states"][-1]
-                + Move.from_hash(int.from_bytes(b"%c%c" % move, byteorder="big"), data["states"][-1])
+            data["boards"].append(
+                data["boards"][-1]
+                + Move.from_hash(
+                    int.from_bytes(b"%c%c" % move, byteorder="big"), data["boards"][-1]
+                )
             )
 
         for k in b"WRBDSM":
             if b"%c" % k in data["headers"]:
                 del data["headers"][b"%c" % k]
-        data["headers"] = {k.decode(): cls.unescape(v.decode()) for k, v in data["headers"].items()}
+        data["headers"] = {
+            k.decode(): cls.unescape(v.decode()) for k, v in data["headers"].items()
+        }
 
         return data
 
     @classmethod
     def encode(
         cls,
-        states: Iterable["BoardInfo"] = [],
+        boards: Iterable["BoardInfo"] = [],
         white_name: str = "?",
         black_name: str = "?",
-        date: datetime = None,
-        result: str = NOT_FINISHED,
+        date: str = "?",
+        result: GameState = GameState.NORMAL,
         headers: dict[str, str] = {},
     ):
         res = {
@@ -183,11 +218,10 @@ class CGNParser:
             b"B": black_name.encode(),
             b"R": cls.RESULT_CODES[result],
         }
-        if date is not None:
-            res[b"D"] = date.encode()
+        res[b"D"] = date.encode()
         res.update({k.encode(): cls.escape(v).encode() for k, v in headers.items()})
 
-        for move in get_moves(states):
+        for move in get_moves(boards):
             res[b"M"] += hash(move).to_bytes(2, byteorder="big")
 
         return b"\n".join([k + b"\t" + v for k, v in res.items()])

@@ -15,6 +15,7 @@ from telegram import (
 import logging
 import datetime
 import threading
+import enum
 
 from telegram.ext import Dispatcher, CallbackContext
 from . import core, media, analysis, utils, parsers, base
@@ -38,7 +39,9 @@ def _group_items(obj: list[Any], n: int, head_item: bool = False) -> list[list[A
     return res
 
 
-def _get_pgn_file(update: Update, context: CallbackContext, content: str, match_id: str):
+def _get_pgn_file(
+    update: Update, context: CallbackContext, content: str, match_id: str
+):
     update.effective_chat.send_document(
         content,
         caption=context.langtable["pgn-file-caption"],
@@ -75,7 +78,6 @@ def get_pgn_file(update: Update, context, args: list[Union[str, int]]) -> None:
 
 def from_bytes(src: bytes, bot: Bot, id: str) -> "BaseMatch":
     obj = parsers.CGNParser.decode(src)
-    print(obj)
     if "INLINE" in obj["headers"]:
         return GroupMatch._from_cgn(obj, bot, id)
     elif "difficulty" in obj["headers"]["OPTIONS"]:
@@ -85,26 +87,33 @@ def from_bytes(src: bytes, bot: Bot, id: str) -> "BaseMatch":
 
 
 class BaseMatch:
-    ENGINE_FILENAME = None
+    ENGINE_FILENAME: str = None
     db = None
+    player1: User
+    player2: User
 
     def __init__(
         self,
         dispatcher: Dispatcher = None,
         id: str = None,
-        options: dict[str, str] = {},
+        options: dict[str, str] = {"ruleset": "chess960", "timectrl": "classic"},
         date: str = None,
     ):
         self.init_msg_text: Optional[str] = None
         self.is_chess960: bool = options["ruleset"] == "chess960"
-        self.options = options
+        self.options: dict[str, str] = options
         self.dispatcher: Dispatcher = dispatcher
-        self.states: list[core.BoardInfo] = [core.BoardInfo.init_chess960() if self.is_chess960 else core.BoardInfo.from_fen(utils.STARTPOS)]
-        self.result = "*"
-        self.date = date or datetime.datetime.now().strftime(utils.DATE_FORMAT)
+        self.boards: list[core.BoardInfo] = [
+            core.BoardInfo.init_chess960()
+            if self.is_chess960
+            else core.BoardInfo.from_fen(utils.STARTPOS)
+        ]
+        self.state: core.GameState = core.GameState.NORMAL
+        self.date: str = date or datetime.datetime.now().strftime(utils.DATE_FORMAT)
         self.id: str = id if id else base.create_match_id()
-        self.video_filename: str = f"chess4u-{self.id}.mp4"
-        self.image_filename: str = f"chess4u-{self.id}.jpg"
+
+    def __contains__(self, user: User):
+        return user == self.player1 or user == self.player2
 
     @property
     def bot(self) -> Bot:
@@ -139,36 +148,40 @@ class BaseMatch:
     @property
     def pieces(self) -> tuple[tuple[core.BasePiece]]:
         return (
-            (self.states[-1].whites, self.states[-1].blacks)
-            if self.states[-1].is_white_turn
-            else (self.states[-1].blacks, self.states[-1].whites)
+            (self.boards[-1].whites, self.boards[-1].blacks)
+            if self.boards[-1].is_white_turn
+            else (self.boards[-1].blacks, self.boards[-1].whites)
         )
 
-    def get_state(self) -> Optional[str]:
-        cur_king = self.states[-1]["k", self.states[-1].is_white_turn][0]
+    def get_state(self) -> core.GameState:
+        cur_king = self.boards[-1][core.King, self.boards[-1].is_white_turn][0]
         if cur_king.in_checkmate():
-            return "checkmate"
+            return (
+                core.GameState.WHITE_CHECKMATED
+                if self.boards[-1].is_white_turn
+                else core.GameState.BLACK_CHECKMATED
+            )
         if cur_king.in_check():
-            return "check"
+            return core.GameState.CHECK
 
-        if self.states[-1].empty_halfturns >= 50:
-            return "50-move-draw"
+        if self.boards[-1].empty_halfturns >= 50:
+            return core.GameState.FIFTY_MOVE_DRAW
         cur_side_moves = [piece.get_moves() for piece in cur_king.allied_pieces]
-        if len(self.states) >= 8:
+        if len(self.boards) >= 8:
             for move in itertools.chain(
                 *(
                     [piece.get_moves() for piece in cur_king.enemy_pieces]
                     + cur_side_moves
                 )
             ):
-                test_board = self.states[-1] + move
-                if self.states.count(test_board):
-                    return "3fold-repetition-draw"
+                test_board = self.boards[-1] + move
+                if self.boards.count(test_board) == 3:
+                    return core.GameState.THREEFOLD_REPETITION_DRAW
         if next(itertools.chain(*cur_side_moves), None) is None:
-            return "stalemate-draw"
+            return core.GameState.STALEMATE_DRAW
 
         pawns, knights, bishops, rooks, queens = [
-            self.states[-1][cls] for cls in "pnbrq"
+            self.boards[-1][cls] for cls in (core.Pawn, core.Knight, core.Bishop, core.Rook, core.Queen)
         ]
         if not rooks and not queens and not pawns:
             if any(
@@ -181,47 +194,43 @@ class BaseMatch:
                     and not knights,
                 ]
             ):
-                return "insufficient-material-draw"
+                return core.GameState.INSUFFIECENT_MATERIAL_DRAW
 
-        return "normal"
+        return core.GameState.NORMAL
 
     def _send_analysis_video(self: Union["GroupMatch", "PMMatch"], lang_code: str, text: str):
-        analyser = analysis.ChessEngine(BaseMatch.ENGINE_FILENAME)
-        video, thumb = media.board_video(self, lang_code, analyser=analyser)
-        new_msg = InputMediaVideo(
-            base.get_tempfile_url(video, "video/mp4"), caption=text, thumb=thumb
-        )
-        self.db.set(
-            f"{self.id}:pgn",
-            gzip.compress(
-                parsers.PGNParser.encode(
-                    self.states,
-                    white_name=self.db.get_name(self.player1),
-                    black_name=self.db.get_name(self.player2),
-                    date=self.date,
-                    result=self.result,
-                ).encode()
-            ),
-            ex=3600 * 48,
-        )
+        try:
+            analyser = analysis.ChessEngine(BaseMatch.ENGINE_FILENAME, default_eval_depth=18)
+            video, thumb = media.board_video(self, lang_code, analyser=analyser)
 
-        if isinstance(self, GroupMatch):
-            self.msg = self.msg.edit_media(
-                media=new_msg,
-                reply_markup=self._keyboard(
-                    [
-                        {
-                            "text": base.langtable[lang_code]["download-pgn"],
-                            "data": ["DOWNLOAD", self.id],
-                        }
-                    ],
-                    expected_uid=self.players[0].id,
-                    handler_id="core",
+
+            new_msg = InputMediaVideo(video, caption=text, thumb=thumb)
+            self.db.set(
+                f"{self.id}:pgn",
+                gzip.compress(
+                    parsers.PGNParser.encode(
+                        self.boards,
+                        white_name=self.db.get_name(self.player1),
+                        black_name=self.db.get_name(self.player2),
+                        date=self.date,
+                        result=self.state,
+                    ).encode()
                 ),
+                ex=3600 * 48,
             )
-        elif isinstance(self, PMMatch):
-            if self.player_msg:
-                self.player_msg = self.player_msg.edit_media(
+        except Exception as exc:
+            self.dispatcher.dispatch_error(None, exc)
+            text += "\n\n" + base.langtable[lang_code]["visualization-error"]
+            if isinstance(self, GroupMatch):
+                self.msg = self.msg.edit_caption(caption=text)
+            elif isinstance(self, PMMatch):
+                if self.player_msg:
+                    self.player_msg = self.player_msg.edit_caption(caption=text)
+                if self.opponent_msg:
+                    self.opponent_msg = self.opponent_msg.edit_caption(caption=text)
+        else:
+            if isinstance(self, GroupMatch):
+                self.msg = self.msg.edit_media(
                     media=new_msg,
                     reply_markup=self._keyboard(
                         [
@@ -234,31 +243,63 @@ class BaseMatch:
                         handler_id="core",
                     ),
                 )
-            elif self.opponent_msg:
-                self.opponent_msg = self.opponent_msg.edit_media(
-                    media=new_msg,
-                    reply_markup=self._keyboard(
-                        [
-                            {
-                                "text": base.langtable[lang_code]["download-pgn"],
-                                "data": ["DOWNLOAD", self.id],
-                            }
-                        ],
-                        expected_uid=self.players[1].id,
-                        handler_id="core",
-                    ),
-                )
+            elif isinstance(self, PMMatch):
+                if self.player_msg:
+                    self.player_msg = self.player_msg.edit_media(
+                        media=new_msg,
+                        reply_markup=self._keyboard(
+                            [
+                                {
+                                    "text": base.langtable[lang_code]["download-pgn"],
+                                    "data": ["DOWNLOAD", self.id],
+                                }
+                            ],
+                            expected_uid=self.players[0].id,
+                            handler_id="core",
+                        ),
+                    )
+                elif self.opponent_msg:
+                    self.opponent_msg = self.opponent_msg.edit_media(
+                        media=new_msg,
+                        reply_markup=self._keyboard(
+                            [
+                                {
+                                    "text": base.langtable[lang_code]["download-pgn"],
+                                    "data": ["DOWNLOAD", self.id],
+                                }
+                            ],
+                            expected_uid=self.players[1].id,
+                            handler_id="core",
+                        ),
+                    )
+                else:
+                    raise ValueError("shit")
             else:
                 raise ValueError("shit")
-        else:
-            raise ValueError("shit")
 
-    def send_analysis_video(self, lang_code: str, state: str) -> None:
-        if state in ("checkmate", "resignation"):
+        if not isinstance(self, AIMatch):
+            if self.state in (core.GameState.BLACK_CHECKMATED, core.GameState.BLACK_RESIGNED):
+                base.set_result(self, {self.player1: True, self.player2: False})
+            elif self.state in (core.GameState.WHITE_CHECKMATED, core.GameState.WHITE_RESIGNED):
+                base.set_result(self, {self.player1: False, self.player2: True})
+            elif self.state == core.GameState.ABORTED:
+                base.set_result(self, {})
+            else:
+                base.set_result(self, {self.player1: True, self.player2: True})
+
+        logging.info("Match result cached")
+
+    def send_analysis_video(self, lang_code: str) -> None:
+        if self.state in (
+            core.GameState.WHITE_CHECKMATED,
+            core.GameState.WHITE_RESIGNED,
+            core.GameState.BLACK_CHECKMATED,
+            core.GameState.BLACK_RESIGNED,
+        ):
             player, opponent = self.players
-            title_text = base.langtable[lang_code][state].format(
-                name=self.db.get_name(player)
-            )
+            title_text = base.langtable[lang_code][
+                self.state.name.lower().replace("_", "-")
+            ].format(name=self.db.get_name(player))
             text = "\n".join(
                 [
                     title_text,
@@ -266,18 +307,18 @@ class BaseMatch:
                         name=self.db.get_name(opponent)
                     ),
                     base.langtable[lang_code]["n-moves"].format(
-                        n=self.states[-1].turn - 1
+                        n=self.boards[-1].turn - 1
                     ),
                 ]
             )
         else:
-            title_text = base.langtable[lang_code][state]
+            title_text = base.langtable[lang_code][self.state.name.lower().replace("_", "-")]
             text = "\n".join(
                 [
                     title_text,
                     base.langtable[lang_code]["is-draw"],
                     base.langtable[lang_code]["n-moves"].format(
-                        n=self.states[-1].turn - 1
+                        n=self.boards[-1].turn - 1
                     ),
                 ]
             )
@@ -295,7 +336,7 @@ class BaseMatch:
             base.get_tempfile_url(
                 media.board_image(
                     lang_code,
-                    self.states,
+                    self.boards,
                     player1_name=self.db.get_name(self.player1),
                     player2_name=self.db.get_name(self.player2),
                 ),
@@ -319,7 +360,8 @@ class BaseMatch:
     def init_turn(self, move: core.Move = None) -> None:
         logging.debug("Move made: " + (move.pgn_encode() if move else ""))
         if move:
-            self.states.append(self.states[-1] + move)
+            self.boards.append(self.boards[-1] + move)
+        self.state = self.get_state()
 
 
 class GroupMatch(BaseMatch):
@@ -328,29 +370,31 @@ class GroupMatch(BaseMatch):
         player1: User = None,
         player2: User = None,
         chat: int = 0,
-        msg: Union[Message, base.InlineMessageAdapter] = None,
+        msg: Union[Message, base.InlineMessage] = None,
         **kwargs,
     ):
         self.player1: User = player1
         self.player2: User = player2
         self.chat_id: int = chat
-        self.msg: Union[Message, base.InlineMessageAdapter] = msg
+        self.msg: Union[Message, base.InlineMessage] = msg
         super().__init__(**kwargs)
 
     def __bytes__(self) -> bytes:
         return parsers.CGNParser.encode(
-            self.states,
+            self.boards,
             white_name=self.db.get_name(self.player1),
             black_name=self.db.get_name(self.player2),
             date=self.date,
-            result=self.result,
+            result=self.state,
             headers={
                 "WUID": hex(self.player1.id)[2:],
                 "BUID": hex(self.player2.id)[2:],
                 "CID": hex(self.chat_id)[2:] if self.chat_id else "0",
-                "MID": hex(self.msg.message_id)[2:] if isinstance(self.msg, Message) else self.msg.message_id,
+                "MID": hex(self.msg.message_id)[2:]
+                if isinstance(self.msg, Message)
+                else self.msg.message_id,
                 "MSGTXT": self.init_msg_text,
-                "INLINE": str(int(isinstance(self.msg, base.InlineMessageAdapter))),
+                "INLINE": str(int(isinstance(self.msg, base.InlineMessage))),
                 "OPTIONS": json.dumps(self.options),
             },
         )
@@ -359,26 +403,32 @@ class GroupMatch(BaseMatch):
     def players(self) -> tuple[User, User]:
         return (
             (self.player1, self.player2)
-            if self.states[-1].is_white_turn
+            if self.boards[-1].is_white_turn
             else (self.player2, self.player1)
         )
 
     @classmethod
     def _from_cgn(cls, obj: dict, dispatcher: Dispatcher, id: str) -> "GroupMatch":
         player1 = User(
-            int(obj["headers"]["WUID"], 16), obj["white_name"], False, bot=dispatcher.bot
+            int(obj["headers"]["WUID"], 16),
+            obj["white_name"],
+            False,
+            bot=dispatcher.bot,
         )
         player2 = User(
-            int(obj["headers"]["BUID"], 16), obj["black_name"], False, bot=dispatcher.bot
+            int(obj["headers"]["BUID"], 16),
+            obj["black_name"],
+            False,
+            bot=dispatcher.bot,
         )
 
         if bool(int(obj["headers"]["INLINE"])):
-            msg = base.InlineMessageAdapter(obj["headers"]["MID"], dispatcher.bot)
+            msg = base.InlineMessage(obj["headers"]["MID"], dispatcher.bot)
         else:
             msg = Message(
-                obj["headers"]["MID"],
+                int(obj["headers"]["MID"], 16),
                 datetime.datetime.strptime(obj["date"], utils.DATE_FORMAT),
-                Chat(int(obj["headers"]["CID"], 16, "group")),
+                Chat(int(obj["headers"]["CID"], 16), "group"),
                 bot=dispatcher.bot,
             )
 
@@ -393,31 +443,28 @@ class GroupMatch(BaseMatch):
             date=obj["date"],
         )
         res.init_msg_text = obj["headers"]["MSGTXT"]
+        res.boards = obj["boards"]
+        return res
 
     def init_turn(self, move: core.Move = None) -> None:
         super().init_turn(move=move)
         player, opponent = self.players
-        state = self.get_state()
         langtable = base.langtable[player.language_code]
-        if "draw" in state:
-            self.result = "1/2-1/2"
-        elif state == "checkmate":
-            self.result = "0-1" if self.states[-1].is_white_turn else "1-0"
 
-        if self.result != "*":
-            self.send_analysis_video(player.language_code, state)
+        if self.state not in (core.GameState.NORMAL, core.GameState.CHECK):
+            self.send_analysis_video(player.language_code)
         else:
-            msg = langtable["curr-move"].format(n=self.states[-1].turn)
+            self.init_msg_text = langtable["curr-move"].format(n=self.boards[-1].turn)
 
-            if state == "check":
-                msg += langtable[player.language_code]["opponent-in-check"].format(
+            if self.state == core.GameState.CHECK:
+                self.init_msg_text += langtable[player.language_code]["opponent-in-check"].format(
                     name=self.db.get_name(player)
                 )
             else:
-                msg += "\n"
+                self.init_msg_text += "\n"
 
-            msg += langtable["opponent-to-move"].format(name=self.db.get_name(player))
-            msg += "; " + langtable["player-to-move"]
+            self.init_msg_text += langtable["opponent-to-move"].format(name=self.db.get_name(player))
+            self.init_msg_text += "; " + langtable["player-to-move"]
 
             keyboard = self._keyboard(
                 [
@@ -429,31 +476,23 @@ class GroupMatch(BaseMatch):
                 ],
                 player.id,
             )
-            self.init_msg_text = msg
-            img = media.board_image(
-                player.language_code,
-                self.states,
-                player1_name=self.db.get_name(self.player1),
-                player2_name=self.db.get_name(self.player2),
-            )
-            if self.msg:
-                self.msg = self.msg.edit_media(
-                    media=InputMediaPhoto(
-                        base.get_tempfile_url(img, "image/jpeg"),
-                        caption=msg,
+            self.msg = self.msg.edit_media(
+                media=InputMediaPhoto(
+                    base.get_tempfile_url(
+                        media.board_image(
+                            player.language_code,
+                            self.boards,
+                            player1_name=self.db.get_name(self.player1),
+                            player2_name=self.db.get_name(self.player2),
+                        ),
+                        "image/jpeg"
                     ),
-                    reply_markup=keyboard,
-                )
-            else:
-                self.msg = self.bot.send_photo(
-                    self.chat_id,
-                    base.get_tempfile_url(img, "image/jpeg"),
-                    caption=msg,
-                    filename=self.image_filename,
-                    reply_markup=keyboard,
-                )
+                    caption=self.init_msg_text,
+                ),
+                reply_markup=keyboard,
+            )
 
-    def handle_input(self, command: str, args: list[Union[str, int, None]]) -> None:
+    def handle_input(self, command: str, args: list[Union[str, int, None]]) -> Optional[dict]:
         player, opponent = self.players
         langtable = base.langtable[player.language_code]
         allies, _ = self.pieces
@@ -498,7 +537,7 @@ class GroupMatch(BaseMatch):
                     base.get_tempfile_url(
                         media.board_image(
                             player.language_code,
-                            self.states,
+                            self.boards,
                             player1_name=self.db.get_name(self.player1),
                             player2_name=self.db.get_name(self.player2),
                         ),
@@ -510,13 +549,13 @@ class GroupMatch(BaseMatch):
             )
 
         elif command == "RESIGN":
-            self.result = "0-1" if self.states[-1].is_white_turn else "1-0"
-            self.send_analysis_video(opponent.language_code, "resignation")
+            self.state = core.GameState.WHITE_RESIGNED if self.boards[-1].is_white_turn else core.GameState.BLACK_RESIGNED
+            self.send_analysis_video(opponent.language_code)
 
         elif command == "CHOOSE_PIECE":
             pos = utils.BoardPoint(args[0])
             dest_buttons = [{"text": langtable["back-button"], "data": ["TURN"]}]
-            moves = self.states[-1][pos].get_moves()
+            moves = self.boards[-1][pos].get_moves()
             for move in moves:
                 if move.is_promotion():
                     dest_buttons.append(
@@ -545,7 +584,7 @@ class GroupMatch(BaseMatch):
                     base.get_tempfile_url(
                         media.board_image(
                             player.language_code,
-                            self.states,
+                            self.boards,
                             selected=pos,
                             possible_moves=moves,
                             player1_name=self.db.get_name(self.player1),
@@ -561,7 +600,7 @@ class GroupMatch(BaseMatch):
         elif command == "PROMOTION_MENU":
             src = utils.BoardPoint(args[0])
             dst = utils.BoardPoint(args[1])
-            move = core.Move.from_piece(self.states[-1][src], dst, new_piece="q")
+            move = core.Move.from_piece(self.boards[-1][src], dst, new_piece=core.Queen)
             pieces = [
                 {
                     "text": langtable["queen"],
@@ -569,15 +608,15 @@ class GroupMatch(BaseMatch):
                 },
                 {
                     "text": langtable["knight"],
-                    "data": ["MOVE", move.copy(new_piece="n").pgn_encode()],
+                    "data": ["MOVE", move.copy(new_piece=core.Knight).pgn_encode()],
                 },
                 {
                     "text": langtable["bishop"],
-                    "data": ["MOVE", move.copy(new_piece="b").pgn_encode()],
+                    "data": ["MOVE", move.copy(new_piece=core.Bishop).pgn_encode()],
                 },
                 {
                     "text": langtable["rook"],
-                    "data": ["MOVE", move.copy(new_piece="r").pgn_encode()],
+                    "data": ["MOVE", move.copy(new_piece=core.Rook).pgn_encode()],
                 },
             ]
             new_text = self.init_msg_text.split("\n")
@@ -593,7 +632,7 @@ class GroupMatch(BaseMatch):
                     base.get_tempfile_url(
                         media.board_image(
                             player.language_code,
-                            self.states,
+                            self.boards,
                             selected=src,
                             possible_moves=[move],
                             player1_name=self.db.get_name(self.player1),
@@ -607,7 +646,7 @@ class GroupMatch(BaseMatch):
             )
 
         elif command == "MOVE":
-            self.init_turn(move=core.Move.from_pgn(args[0], self.states[-1]))
+            self.init_turn(move=core.Move.from_pgn(args[0], self.boards[-1]))
 
 
 class PMMatch(BaseMatch):
@@ -631,11 +670,11 @@ class PMMatch(BaseMatch):
 
     def __bytes__(self) -> bytes:
         return parsers.CGNParser.encode(
-            self.states,
+            self.boards,
             white_name=self.db.get_name(self.player1),
             black_name=self.db.get_name(self.player2),
             date=self.date,
-            result=self.result,
+            result=self.get_state(),
             headers={
                 "WUID": "BOT" if self.player1.is_bot else hex(self.player1.id)[2:],
                 "BUID": "BOT" if self.player2.is_bot else hex(self.player2.id)[2:],
@@ -650,22 +689,22 @@ class PMMatch(BaseMatch):
 
     @property
     def player_msg(self) -> Message:
-        return self.msg1 if self.states[-1].is_white_turn else self.msg2
+        return self.msg1 if self.boards[-1].is_white_turn else self.msg2
 
     @player_msg.setter
     def player_msg(self, msg: Message) -> None:
-        if self.states[-1].is_white_turn:
+        if self.boards[-1].is_white_turn:
             self.msg1 = msg
         else:
             self.msg2 = msg
 
     @property
     def opponent_msg(self) -> Message:
-        return self.msg2 if self.states[-1].is_white_turn else self.msg1
+        return self.msg2 if self.boards[-1].is_white_turn else self.msg1
 
     @opponent_msg.setter
     def opponent_msg(self, msg: Message) -> None:
-        if self.states[-1].is_white_turn:
+        if self.boards[-1].is_white_turn:
             self.msg2 = msg
         else:
             self.msg1 = msg
@@ -674,16 +713,8 @@ class PMMatch(BaseMatch):
     def players(self) -> tuple[User, User]:
         return (
             (self.player1, self.player2)
-            if self.states[-1].is_white_turn
+            if self.boards[-1].is_white_turn
             else (self.player2, self.player1)
-        )
-
-    @property
-    def chat_ids(self) -> tuple[int, int]:
-        return (
-            (self.chat_id1, self.chat_id2)
-            if self.states[-1].is_white_turn
-            else (self.chat_id2, self.chat_id1)
         )
 
     @classmethod
@@ -692,17 +723,21 @@ class PMMatch(BaseMatch):
 
         res = cls(
             player1=User(
-                int(obj["headers"]["WUID"], 16), 
-                obj["white_name"], 
+                int(obj["headers"]["WUID"], 16),
+                obj["white_name"],
                 False,
-                bot=dispatcher.bot
-            ) if obj["headers"]["WUID"] != "BOT" else dispatcher.bot.get_me(),
+                bot=dispatcher.bot,
+            )
+            if obj["headers"]["WUID"] != "BOT"
+            else dispatcher.bot.get_me(),
             player2=User(
-                int(obj["headers"]["BUID"], 16), 
-                obj["black_name"], 
-                False, 
-                bot=dispatcher.bot
-            ) if obj["headers"]["BUID"] != "BOT" else dispatcher.bot.get_me(),
+                int(obj["headers"]["BUID"], 16),
+                obj["black_name"],
+                False,
+                bot=dispatcher.bot,
+            )
+            if obj["headers"]["BUID"] != "BOT"
+            else dispatcher.bot.get_me(),
             chat1=int(obj["headers"]["CID1"], 16),
             chat2=int(obj["headers"]["CID2"], 16),
             msg1=Message(
@@ -711,56 +746,54 @@ class PMMatch(BaseMatch):
                 Chat(int(obj["headers"]["CID1"], 16), "group"),
                 text=obj["headers"]["MSGTXT"],
                 bot=dispatcher.bot,
-            ) if obj["headers"]["MID1"] != "0" else None,
+            )
+            if obj["headers"]["MID1"] != "0"
+            else None,
             msg2=Message(
                 int(obj["headers"]["MID2"], 16),
                 date,
                 Chat(int(obj["headers"]["CID2"], 16), "group"),
                 bot=dispatcher.bot,
-            ) if obj["headers"]["MID2"] != "0" else None,
+            )
+            if obj["headers"]["MID2"] != "0"
+            else None,
             options=json.loads(obj["headers"]["OPTIONS"]),
             dispatcher=dispatcher,
             id=id,
             date=obj["date"],
         )
         res.init_msg_text = obj["headers"]["MSGTXT"]
+        res.boards = obj["boards"]
         return res
 
-    def init_turn(self, move: core.Move = None, call_parent_method: bool = True):
+    def init_turn(self, move: core.Move = None):
         super().init_turn(move=move)
 
         player, opponent = self.players
-        player_chatid, opponent_chatid = self.chat_ids
         player_langtable = base.langtable[player.language_code]
         opponent_langtable = base.langtable[opponent.language_code]
-        state = self.get_state()
-        if "draw" in state:
-            self.result = "1/2-1/2"
-        elif state == "checkmate":
-            self.result = "0-1" if self.states[-1].is_white_turn else "1-0"
 
-        if self.result != "*":
-            self.send_analysis_video(player.language_code, state)
+        if self.state not in (core.GameState.NORMAL, core.GameState.CHECK):
+            self.send_analysis_video(player.language_code)
         else:
-            player_msg = player_langtable["curr-move"].format(n=self.states[-1].turn)
+            self.init_msg_text = player_langtable["curr-move"].format(n=self.boards[-1].turn)
             opponent_msg = opponent_langtable["curr-move"].format(
-                n=self.states[-1].turn
+                n=self.boards[-1].turn
             )
 
-            if state == "check":
-                player_msg += player_langtable["player-in-check"].format()
+            if self.state == core.GameState.CHECK:
+                self.init_msg_text += player_langtable["player-in-check"].format()
                 opponent_msg += opponent_langtable["player-in-check"].format(
                     name=self.db.get_name(player)
                 )
             else:
-                player_msg = opponent_msg = player_msg + "\n"
+                self.init_msg_text = opponent_msg = self.init_msg_text + "\n"
 
             opponent_msg += opponent_langtable["opponent-to-move"].format(
                 name=self.db.get_name(player)
             )
-            player_msg += player_langtable["player-to-move"]
+            self.init_msg_text += player_langtable["player-to-move"]
 
-            self.init_msg_text = player_msg
             keyboard = self._keyboard(
                 [
                     {"text": player_langtable["move-button"], "data": ["TURN"]},
@@ -777,34 +810,15 @@ class PMMatch(BaseMatch):
                         base.get_tempfile_url(
                             media.board_image(
                                 player.language_code,
-                                self.states,
+                                self.boards,
                                 player1_name=self.db.get_name(self.player1),
                                 player2_name=self.db.get_name(self.player2),
                             ),
                             "image/jpeg",
                         ),
-                        caption=player_msg,
+                        caption=self.init_msg_text,
                     ),
                     reply_markup=keyboard,
-                )
-            elif player_chatid:
-                self.player_msg = (
-                    self.bot.send_photo(
-                        player_chatid,
-                        base.get_tempfile_url(
-                            media.board_image(
-                                player.language_code,
-                                self.states,
-                                player1_name=self.db.get_name(self.player1),
-                                player2_name=self.db.get_name(self.player2),
-                            ),
-                            "image/jpeg",
-                        ),
-                        caption=player_msg,
-                        reply_markup=keyboard,
-                    )
-                    if player_chatid
-                    else None
                 )
 
             if self.opponent_msg:
@@ -813,7 +827,7 @@ class PMMatch(BaseMatch):
                         base.get_tempfile_url(
                             media.board_image(
                                 opponent.language_code,
-                                self.states,
+                                self.boards,
                                 player1_name=self.db.get_name(self.player1),
                                 player2_name=self.db.get_name(self.player2),
                             ),
@@ -822,22 +836,8 @@ class PMMatch(BaseMatch):
                         caption=opponent_msg,
                     )
                 )
-            elif opponent_chatid:
-                self.opponent_msg = self.bot.send_photo(
-                    opponent_chatid,
-                    base.get_tempfile_url(
-                        media.board_image(
-                            opponent.language_code,
-                            self.states,
-                            player1_name=self.db.get_name(self.player1),
-                            player2_name=self.db.get_name(self.player2),
-                        ),
-                        "image/jpeg",
-                    ),
-                    caption=opponent_msg,
-                )
 
-    def handle_input(self, command: str, args: list[Union[str, int, None]]):
+    def handle_input(self, command: str, args: list[Union[str, int, None]]) -> Optional[dict]:
         player, opponent = self.players
         langtable = base.langtable[player.language_code]
         allies, _ = self.pieces
@@ -847,7 +847,7 @@ class PMMatch(BaseMatch):
                     base.get_tempfile_url(
                         media.board_image(
                             player.language_code,
-                            self.states,
+                            self.boards,
                             player1_name=self.db.get_name(self.player1),
                             player2_name=self.db.get_name(self.player2),
                         ),
@@ -889,7 +889,7 @@ class PMMatch(BaseMatch):
                     base.get_tempfile_url(
                         media.board_image(
                             player.language_code,
-                            self.states,
+                            self.boards,
                             player1_name=self.db.get_name(self.player1),
                             player2_name=self.db.get_name(self.player2),
                         ),
@@ -901,13 +901,13 @@ class PMMatch(BaseMatch):
             )
 
         elif command == "RESIGN":
-            self.result = "0-1" if self.states[-1].is_white_turn else "1-0"
-            self.send_analysis_video(player.language_code, "resignation")
+            self.state = core.GameState.WHITE_RESIGNED if self.boards[-1].is_white_turn else core.GameState.BLACK_RESIGNED
+            self.send_analysis_video(player.language_code)
 
         elif command == "CHOOSE_PIECE":
             pos = utils.BoardPoint(args[0])
             dest_buttons = [{"text": langtable["back-button"], "data": ["TURN"]}]
-            moves = self.states[-1][pos].get_moves()
+            moves = self.boards[-1][pos].get_moves()
             for move in moves:
                 if move.is_promotion():
                     dest_buttons.append(
@@ -932,7 +932,7 @@ class PMMatch(BaseMatch):
                     base.get_tempfile_url(
                         media.board_image(
                             player.language_code,
-                            self.states,
+                            self.boards,
                             selected=pos,
                             possible_moves=moves,
                             player1_name=self.db.get_name(self.player1),
@@ -948,7 +948,7 @@ class PMMatch(BaseMatch):
         elif command == "PROMOTION_MENU":
             src = utils.BoardPoint(args[0])
             dst = utils.BoardPoint(args[1])
-            move = core.Move.from_piece(self.states[-1][src], dst, new_piece="q")
+            move = core.Move.from_piece(self.boards[-1][src], dst, new_piece=core.Queen)
             pieces = [
                 {
                     "text": langtable["queen"],
@@ -956,15 +956,15 @@ class PMMatch(BaseMatch):
                 },
                 {
                     "text": langtable["knight"],
-                    "data": ["MOVE", move.copy(new_piece="n").pgn_encode()],
+                    "data": ["MOVE", move.copy(new_piece=core.Knight).pgn_encode()],
                 },
                 {
                     "text": langtable["bishop"],
-                    "data": ["MOVE", move.copy(new_piece="b").pgn_encode()],
+                    "data": ["MOVE", move.copy(new_piece=core.Bishop).pgn_encode()],
                 },
                 {
                     "text": langtable["rook"],
-                    "data": ["MOVE", move.copy(new_piece="r").pgn_encode()],
+                    "data": ["MOVE", move.copy(new_piece=core.Rook).pgn_encode()],
                 },
             ]
 
@@ -976,7 +976,7 @@ class PMMatch(BaseMatch):
                     base.get_tempfile_url(
                         media.board_image(
                             player.language_code,
-                            self.states,
+                            self.boards,
                             selected=src,
                             possible_moves=[move],
                             player1_name=self.db.get_name(self.player1),
@@ -990,7 +990,7 @@ class PMMatch(BaseMatch):
             )
 
         elif command == "MOVE":
-            return self.init_turn(move=core.Move.from_pgn(args[0], self.states[-1]))
+            return self.init_turn(move=core.Move.from_pgn(args[0], self.boards[-1]))
 
 
 class AIMatch(PMMatch):
@@ -1000,11 +1000,10 @@ class AIMatch(PMMatch):
         "high-diff": (0, 1, 2),
         "max-diff": (0,),
     }
-    EVAL_DEPTH = 18
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.engine = analysis.ChessEngine(self.ENGINE_FILENAME)
+        self.engine = analysis.ChessEngine(self.ENGINE_FILENAME, default_eval_depth=18)
         self.difficulty = self.options["difficulty"]
 
         self.engine.set_move_probabilities(self.DIFF_PRESETS[self.difficulty])
@@ -1013,11 +1012,11 @@ class AIMatch(PMMatch):
     def init_turn(self, move: core.Move = None, **kwargs) -> None:
         if move is None:
             if self.player1.is_bot:
-                super().init_turn(self.engine.get_move(self.states[-1], self.EVAL_DEPTH))
+                super().init_turn(
+                    self.engine.get_move(self.boards[-1], self.EVAL_DEPTH)
+                )
             elif self.player2.is_bot:
                 super().init_turn(**kwargs)
         else:
             super().init_turn(move=move, **kwargs)
-            return super().init_turn(
-                self.engine.get_move(self.states[-1], self.EVAL_DEPTH)
-            )
+            return super().init_turn(self.engine.get_move(self.boards[-1]))

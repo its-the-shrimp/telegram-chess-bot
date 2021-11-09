@@ -12,6 +12,8 @@ from .core import (
     Rook,
     Queen,
     King,
+    MoveEval,
+    GameState,
 )
 from .matches import (
     BaseMatch,
@@ -24,9 +26,9 @@ from .matches import (
 from .parsers import PGNParser, CGNParser, get_moves
 
 
-def init(is_debug: bool, conn):
+def init(is_debug: bool):
     BaseMatch.ENGINE_FILENAME = "./stockfish" if is_debug else "./stockfish_14_x64"
-    BaseMatch.db = conn
+    BaseMatch.db = base.database
 
 
 OPTIONS = {
@@ -52,5 +54,5 @@ OPTIONS = {
         "condition": lambda obj: obj["mode"] == "vsbot",
     },
 }
-KEYBOARD_BUTTONS = {"DOWNLOAD": get_pgn_file}
+KEYBOARD_COMMANDS: dict[str, Callable[[Update, CallbackContext, list[Union[str, int]]], None]] = {"DOWNLOAD": get_pgn_file}
 INVITE_IMAGE = "https://raw.githubusercontent.com/schvv31n/telegram-chess-bot/master/images/static/inline-thumb.jpg"

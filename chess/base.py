@@ -1,19 +1,20 @@
 import os
 import json
-from typing import Callable, Iterable, Union
+from typing import Any, Callable, Iterable, Optional, Union
 import uuid
 import mimetypes
 import pickle
 import random
 from telegram.ext import Dispatcher, CallbackContext
 from telegram.utils import helpers
-from telegram import Bot, Update
+from telegram import Bot, Update, User
 
 TelegramCallback = Callable[[Update, CallbackContext], None]
-
+database = None
+dispatcher: Dispatcher = None
 
 class DefaultTable(dict):
-    def __init__(self, *args, def_f: Callable = None, **kwargs):
+    def __init__(self, *args, def_f: Callable[["DefaultTable", Any], Any] = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.def_f = def_f
 
@@ -27,20 +28,32 @@ class DefaultTable(dict):
                 raise exc
 
 
-class InlineMessageAdapter:
+class InlineMessage:
     def __init__(self, message_id: str, bot: Bot):
         self.message_id = message_id
         self.bot = bot
 
-    def edit_caption(self, caption: str, **kwargs) -> "InlineMessageAdapter":
-        self.bot.edit_message_caption(
-            caption=caption, inline_message_id=self.message_id, **kwargs
-        )
-        return self
+    def edit_caption(self, **kwargs) -> Optional["InlineMessage"]:
+        res = self.bot.edit_message_caption(inline_message_id=self.message_id, **kwargs)
+        return self if res else None
 
-    def edit_media(self, **kwargs) -> "InlineMessageAdapter":
-        self.bot.edit_message_media(inline_message_id=self.message_id, **kwargs)
-        return self
+    def edit_media(self, **kwargs) -> Optional["InlineMessage"]:
+        res = self.bot.edit_message_media(inline_message_id=self.message_id, **kwargs)
+        return self if res else None
+
+    def edit_text(self, **kwargs) -> Optional["InlineMessage"]:
+        res = self.bot.edit_message_media(inline_message_id=self.message_id, **kwargs)
+        return self if res else None
+
+    def edit_text(self, **kwargs) -> Optional["InlineMessage"]:
+        res = self.bot.edit_message_text(inline_message_id=self.message_id, **kwargs)
+        return self if res else None
+
+
+def set_dispatcher(dp: Dispatcher):
+    global dispatcher, database
+    dispatcher = dp
+    database = dispatcher.bot_data["conn"]
 
 
 def format_callback_data(
@@ -65,12 +78,7 @@ def parse_callback_data(data: str) -> dict[str, Union[str, int, None]]:
     }
     if data[3]:
         for argument in data[3].split("#"):
-            if argument.isdigit():
-                res["args"].append(int(argument))
-            elif argument:
-                res["args"].append(argument)
-            else:
-                res["args"].append(None)
+            res["args"].append(int(argument) if argument.isdigit() else argument)
 
     return res
 
@@ -100,10 +108,6 @@ def create_match_id(n=8) -> str:
     )
 
 
-def set_pending_message_expire_hook(dispatcher: Dispatcher, f: TelegramCallback):
-    dispatcher.bot_data["pm_expire_hook"] = f
-
-
 def set_pending_message(
     dispatcher: Dispatcher,
     f: TelegramCallback,
@@ -121,6 +125,17 @@ def set_pending_message(
     )
 
     return helpers.create_deep_linked_url(dispatcher.bot.username, "pmid" + pmsg_id)
+
+
+def set_result(match, user_results: dict[User, bool]):
+    for user, is_winner in user_results.items():
+        total_games = int(database.get(f"{user.id}:total") or 0)
+        database.set(f"{user.id}:total", str(total_games + 1).encode())
+        if is_winner:
+            total_wins = int(database.get(f"{user.id}:wins") or 0)
+            database.set(f"{user.id}:wins", str(total_wins + 1).encode())
+
+    del dispatcher.bot_data["matches"][match.id]
 
 
 langtable_cls = lambda obj: DefaultTable(obj, def_f=lambda _, k: k)

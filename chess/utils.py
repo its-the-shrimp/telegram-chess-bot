@@ -6,6 +6,10 @@ STARTPOS = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 DATE_FORMAT = "%Y.%m.%d"
 
 
+def _reversed(src: dict):
+    return {v: k for k, v in src.items()}
+
+
 class BoardPoint:
     row: int
     column: int
@@ -58,8 +62,8 @@ class BoardPoint:
     def __iter__(self) -> Iterator:
         return (self.file, self.rank).__iter__()
 
-    def copy(self, row: int = None, column: int = None):
-        return self.__class__(column or self.file, row or self.rank)
+    def copy(self, file: int = None, rank: int = None):
+        return self.__class__(file or self.file, rank or self.rank)
 
     def is_lightsquare(self) -> bool:
         return self.file % 2 != self.rank % 2
