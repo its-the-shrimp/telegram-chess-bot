@@ -204,7 +204,11 @@ class BaseMatch:
             video, thumb = media.board_video(self, lang_code, analyser=analyser)
 
 
-            new_msg = InputMediaVideo(video, caption=text, thumb=thumb)
+            new_msg = InputMediaVideo(
+                base.get_tempfile_url(video, "video/mp4"), 
+                caption=text, 
+                thumb=base.get_tempfile_url(thumb, "image/jpeg")
+            )
             self.db.set(
                 f"{self.id}:pgn",
                 gzip.compress(
@@ -218,17 +222,6 @@ class BaseMatch:
                 ),
                 ex=3600 * 48,
             )
-        except Exception as exc:
-            self.dispatcher.dispatch_error(None, exc)
-            text += "\n\n" + base.langtable[lang_code]["visualization-error"]
-            if isinstance(self, GroupMatch):
-                self.msg = self.msg.edit_caption(caption=text)
-            elif isinstance(self, PMMatch):
-                if self.player_msg:
-                    self.player_msg = self.player_msg.edit_caption(caption=text)
-                if self.opponent_msg:
-                    self.opponent_msg = self.opponent_msg.edit_caption(caption=text)
-        else:
             if isinstance(self, GroupMatch):
                 self.msg = self.msg.edit_media(
                     media=new_msg,
@@ -276,6 +269,17 @@ class BaseMatch:
                     raise ValueError("shit")
             else:
                 raise ValueError("shit")
+        except Exception as exc:
+            self.dispatcher.dispatch_error(None, exc)
+            text += "\n\n" + base.langtable[lang_code]["visualization-error"]
+            if isinstance(self, GroupMatch):
+                self.msg = self.msg.edit_caption(caption=text)
+            elif isinstance(self, PMMatch):
+                if self.player_msg:
+                    self.player_msg = self.player_msg.edit_caption(caption=text)
+                if self.opponent_msg:
+                    self.opponent_msg = self.opponent_msg.edit_caption(caption=text)
+            
 
         if not isinstance(self, AIMatch):
             if self.state in (core.GameState.BLACK_CHECKMATED, core.GameState.BLACK_RESIGNED):
@@ -499,7 +503,7 @@ class GroupMatch(BaseMatch):
 
         if command == "INIT_MSG":
             self.msg = self.msg.edit_caption(
-                self.init_msg_text,
+                caption=self.init_msg_text,
                 reply_markup=self._keyboard(
                     [
                         {"text": langtable["move-button"], "data": ["TURN"]},
