@@ -189,7 +189,7 @@ class EvalScore:
 
     def __str__(self):
         if self.mate_in != 0:
-            return ("+" if self.mate_in > 0 else "") + f"M{self.mate_in}"
+            return ("+" if self.mate_in > 0 else "-") + f"M{abs(self.mate_in)}"
         else:
             return ("+" if self.score > 0 else "") + f"{self.score:.2f}"
 
@@ -396,6 +396,5 @@ class ChessEngine:
                     else:
                         mark = MoveEval.GREAT
 
-        print(second_best_line)
         return mark, best_line["pv"][0], best_line["score"]
             

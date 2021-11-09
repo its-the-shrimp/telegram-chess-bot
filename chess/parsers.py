@@ -32,10 +32,6 @@ class PGNParser:
         boards = [BoardInfo.from_fen(startpos)]
         *_moves, _result = src.replace("\n", " ").split()
 
-        for token in _moves:
-            if not (token[:-1].isdigit() and token[-1] == "."):
-                boards.append(boards[-1] + Move.from_pgn(token, boards[-1]))
-
         if _result in ("1/2-1/2", ".5-.5", "0.5-0.5"):
             result = GameState.DRAW
         if _result in ("1-0", "0-1"):
@@ -51,8 +47,15 @@ class PGNParser:
                     if boards[-1].is_white_turn
                     else GameState.BLACK_RESIGNED
                 )
-        else:
+        elif _result == "*":
             result = GameState.CHECK if "+" in _moves[-1] else GameState.NORMAL
+        else:
+            result = GameState.CHECK if "+" in _result else GameState.NORMAL
+            _moves.append(_result)
+
+        for token in _moves:
+            if not (token[:-1].isdigit() and token[-1] == "."):
+                boards.append(boards[-1] + Move.from_pgn(token, boards[-1]))
 
         return boards, result
 
@@ -132,7 +135,7 @@ class PGNParser:
             "Round": "-",
             "White": white_name,
             "Black": black_name,
-            "Result": result,
+            "Result": cls.RESULT_CODES[result],
         }
         startpos = boards[0].get_fen()
         if startpos != STARTPOS:

@@ -84,7 +84,7 @@
         "high-diff": "High Difficulty",
         "max-diff": "Maximum Difficulty!",
         "move-eval-desc": {
-            "!?": "Interesting move",
+            "!?": "Precise move",
             "!!!": "Best move",
             "!!": "Great move",
             "!": "Good move",
@@ -179,7 +179,7 @@
         "high-diff": "Высокий",
         "max-diff": "Максимальный",
         "move-eval-desc": {
-            "!?": "Интересный ход",
+            "!?": "Точный ход",
             "!!!": "Лучший ход",
             "!!": "Отличный ход",
             "!": "Хороший ход",

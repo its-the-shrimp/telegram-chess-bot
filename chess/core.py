@@ -377,7 +377,7 @@ class King(BasePiece):
                     piece = board[BoardPoint(*[i + d for i, d in zip(diff, pos)])]
                     if type(piece) in (cls, Queen) and piece.is_white != is_white:
                         return True
-                    elif isinstance(piece, BasePiece) and piece.is_white == is_white:
+                    elif piece is not None:
                         break
 
         for cls in (King, Knight):
@@ -585,6 +585,9 @@ class Move:
 
     def is_promotion(self) -> bool:
         return self.piece == Pawn and bool(self.new_piece)
+
+    def apply(self) -> "BoardInfo":
+        return self.board + self
 
     def enpassant_pos(self) -> list[Optional[BoardPoint]]:
         if self.piece == Pawn and abs(self.src.rank - self.dst.rank) == 2:

@@ -202,6 +202,7 @@ class BaseMatch:
         try:
             analyser = analysis.ChessEngine(BaseMatch.ENGINE_FILENAME, default_eval_depth=18)
             video, thumb = media.board_video(self, lang_code, analyser=analyser)
+            logging.info("Analysis video created")
 
 
             new_msg = InputMediaVideo(
@@ -460,12 +461,11 @@ class GroupMatch(BaseMatch):
         else:
             self.init_msg_text = langtable["curr-move"].format(n=self.boards[-1].turn)
 
+            self.init_msg_text += "\n"
             if self.state == core.GameState.CHECK:
-                self.init_msg_text += langtable[player.language_code]["opponent-in-check"].format(
+                self.init_msg_text += langtable["opponent-in-check"].format(
                     name=self.db.get_name(player)
                 )
-            else:
-                self.init_msg_text += "\n"
 
             self.init_msg_text += langtable["opponent-to-move"].format(name=self.db.get_name(player))
             self.init_msg_text += "; " + langtable["player-to-move"]
