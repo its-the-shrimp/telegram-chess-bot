@@ -497,7 +497,6 @@ class GroupMatch(BaseMatch):
 
     def handle_input(self, command: str, args: list[Union[str, int, None]]) -> Optional[dict]:
         try:
-            2 / 0
             player, opponent = self.players
             langtable = base.langtable[player.language_code]
             allies, _ = self.pieces
