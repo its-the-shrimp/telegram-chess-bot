@@ -474,7 +474,7 @@ def stats(update: tg.Update, context: BoardGameContext):
                 name=context.db.get_name(update.effective_user),
                 total=user_data["total"],
                 wins=user_data["wins"],
-                winrate=user_data["wins"] / user_data["total"],
+                winrate=user_data["wins"] / user_data["total"] if user_data["total"] else 0.0,
             ),
             parse_mode=tg.ParseMode.HTML,
         )
