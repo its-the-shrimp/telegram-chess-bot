@@ -2,7 +2,7 @@ import io
 import queue
 import os, sys
 import json
-from typing import Iterator, Optional, Callable, Any, Generator, Type
+from typing import Iterator, Optional, Callable, Any, Generator, Type, Union
 import telegram as tg
 from telegram import messageautodeletetimerchanged
 import chess as core
@@ -19,9 +19,6 @@ import redis
 INLINE_OPTION_PATTERN = re.compile(r"\w+:\d")
 flask_callbacks: list[tuple, dict] = []
 tg_handlers: list[tg.ext.Handler] = []
-if hasattr(core, "TEXT_COMMANDS"):
-    for command, f in core.TEXT_COMMANDS:
-        tg_handlers.append(tg.ext.CommandHandler(command, f))
 
 debug_env_path = os.path.join(os.path.dirname(__file__), "debug_env.json")
 IS_DEBUG = os.path.exists(debug_env_path)
@@ -46,14 +43,21 @@ class RedisInterface(redis.Redis):
 
     def get_pending_message(
         self, pmid: str
-    ) -> Optional[Callable[[tg.Update, "BoardGameContext"], None]]:
+    ) -> Optional[tuple[Callable[[tg.Update, "BoardGameContext"], None], tuple, dict]]:
         raw_f = self.get(f"pm:{pmid}:f")
         if int(self.get(f"pm:{pmid}:is-single").decode()) and raw_f:
             self.delete(f"pm:{pmid}:f", f"pm:{pmid}:is-single")
             return pickle.loads(raw_f)
 
     def get_name(self, user: tg.User) -> str:
-        if self.get_anon_mode(user):
+        """
+If user has enabled anonymous mode, returns "player(ID of the user)", 
+otherwise returns his username, or full name, if no username is available.
+Arguments:
+    user: `User` - User whose name needs to bee queried.
+Returns: `str` - Name of the user.
+        """
+        if self.exists(f"{user.id}:isanon"):
             return f"player{user.id}"
         else:
             return user.name
@@ -73,17 +77,11 @@ class RedisInterface(redis.Redis):
             res["from_user"] = tg.User.de_json(res["from_user"], self.bot)
             return res
 
-    def get_anon_mode(self, user: tg.User) -> bool:
-        return bool(self.exists(f"{user.id}:isanon"))
-
     def set_anon_mode(self, user: tg.User, value: bool) -> None:
         if value:
             self.set(f"{user.id}:isanon", b"1")
         else:
             self.delete(f"{user.id}:isanon")
-
-    def get_langcode(self, user: tg.User) -> str:
-        return (self.get(f"{user.id}:lang") or b"en").decode()
 
     def get_user_ids(self) -> Generator[int, None, None]:
         for key in self.scan_iter(match="*:lang"):
@@ -100,6 +98,23 @@ class RedisInterface(redis.Redis):
                 counter[key] = 1
 
         return counter
+
+    def __getitem__(self, user_id: int) -> Union[dict, bytes]:
+        if isinstance(user_id, int):
+            return {
+                "lang_code": (self.get(f"{user_id}:lang") or b"en").decode(),
+                "is_anon": bool(self.exists(f"{user_id}:isanon")),
+                "total": int(self.get(f"{user_id}:total") or 0),
+                "wins": int(self.get(f"{user_id}:wins") or 0)
+            }
+        else:
+            return super().__getitem__(user_id)
+    
+    def __delitem__(self, user_id: int) -> bool:
+        if isinstance(user_id, int):
+            return bool(self.delete(f"{user_id}:lang", f"{user_id}:isanon", f"{user_id}:total", f"{user_id}:wins"))
+        else:
+            return bool(super().__delitem__(user_id))
 
 
 class OptionValue:
@@ -406,9 +421,9 @@ def start(update: tg.Update, context: BoardGameContext):
     if context.args:
         if context.args[0].startswith("pmid"):
             pmsg_id = context.args[0].removeprefix("pmid")
-            pm = context.db.get_pending_message(pmsg_id)
+            pm, pm_args, pm_kwargs = context.db.get_pending_message(pmsg_id)
             if pm is not None:
-                pm[0](update, context, *pm[1])
+                pm(update, context, *pm_args, **pm_kwargs)
             elif hasattr(core, "on_pm_expired"):
                 core.on_pm_expired(update, context)
     else:
@@ -438,6 +453,22 @@ def settings(update: tg.Update, context: BoardGameContext):
             ]
         ),
     )
+
+@tg_callback(tg.ext.CommandHandler, "stats")
+def stats(update: tg.Update, context: BoardGameContext):
+    try:
+        user_data = context.db[update.effective_user.id]
+        update.effective_message.reply_text(
+            context.langtable["main:stats"].format(
+                name=context.db.get_name(update.effective_user),
+                total=user_data["total"],
+                wins=user_data["wins"],
+                winrate=user_data["wins"] / user_data["total"]
+            ),
+            parse_mode=tg.ParseMode.HTML
+        )
+    except BaseException as exc:
+        context.dispatcher.dispatch_error(update, exc)
 
 
 @tg_callback(tg.ext.CommandHandler, core.__name__)
@@ -518,7 +549,7 @@ def button_callback(update: tg.Update, context: BoardGameContext) -> Optional[tu
         args["expected_uid"]
         and args["expected_uid"] != update.callback_query.from_user.id
     ):
-        if args["target_id"] == "MAIN":
+        if args["handler_id"] == "MAIN":
             update.callback_query.answer(context.langtable["main:error-popup-msg"])
         else:
             update.callback_query.answer(
@@ -527,7 +558,7 @@ def button_callback(update: tg.Update, context: BoardGameContext) -> Optional[tu
             )
         return
 
-    if args["target_id"] == "MAIN":
+    if args["handler_id"] == "MAIN":
         if args["command"] == "NA":
             update.callback_query.answer(text=context.langtable["main:error-popup-msg"])
         elif args["command"] == "ANON_MODE_OFF":
@@ -833,11 +864,11 @@ def button_callback(update: tg.Update, context: BoardGameContext) -> Optional[tu
                 f"unknown command {args['command']} for handler {args['target_id']}"
             )
 
-    elif args["target_id"] == "core":
+    elif args["handler_id"] == "core":
         core.KEYBOARD_COMMANDS[args["command"]](update, context, args["args"])
     else:
-        if context.bot_data["matches"].get(args["target_id"]):
-            res = context.bot_data["matches"][args["target_id"]].handle_input(
+        if context.bot_data["matches"].get(args["handler_id"]):
+            res = context.bot_data["matches"][args["handler_id"]].handle_input(
                 args["command"], args["args"]
             )
             update.callback_query.answer(**(res or {}))
@@ -904,6 +935,10 @@ def create_app() -> TelegramBotApp:
         dispatcher.bot_data["matches"][id] = match
     logging.info(f"Fetching matches: {dispatcher.bot_data['matches']}")
 
+    if hasattr(core, "TEXT_COMMANDS"):
+        for cmd, f in core.TEXT_COMMANDS.items():
+            tg_callback(tg.ext.CommandHandler, cmd)(f)
+
     for handler in tg_handlers:
         dispatcher.add_handler(handler)
     dispatcher.add_error_handler(error_handler)
@@ -932,7 +967,7 @@ if __name__ == "__main__":
     elif sys.argv[1] == "db":
         print("Connecting to database...")
         env = json.load(open("debug_env.json"))
-        conn = RedisInterface.from_url(env["REDISCLOUD_URL"])
+        conn: RedisInterface = RedisInterface.from_url(env["REDISCLOUD_URL"])
 
         os.system("clear")
         print(
@@ -975,11 +1010,15 @@ if __name__ == "__main__":
 
             elif command == "user-stats":
                 print("Number of users per language code:")
-                allusers = 0
-                for langcode, count in conn.get_langcodes_stats().items():
-                    allusers += count
-                    print(f"{langcode}: {count}")
-                print(f"\nTotal {allusers} users.")
+                langcodes = {}
+                all_users = 0
+                for uid in conn.get_user_ids():
+                    userdata = conn.get_user_data()
+                    langcodes[userdata["lang_code"]] = langcodes.get(userdata["lang_code"], 0) + 1
+                    all_users += 1
+                for lang_code, n in langcodes.items():
+                    print(f"  {lang_code}: {n}")
+                print(f"\nTotal {all_users} users.")
 
             elif command == "help":
                 print(

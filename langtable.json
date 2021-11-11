@@ -2,7 +2,8 @@
     "en": {
         "main:cmds": {
             "/chess": "Play chess",
-            "/settings": "Bot settings, such as anonymous mode etc."
+            "/settings": "Bot settings, such as anonymous mode etc.",
+            "/stats": "User stats in the bot."
         },
         "main:unknown-cmd": "Unknown command. Maybe you meant {suggested}?",
         "main:start-msg": "Hello! To play, use the /chess command.",
@@ -46,6 +47,7 @@
         "main:invite-accepted": "Invite from {name} accepted",
         "main:invite-sent": "Invite sent",
         "main:options-title": "Game settings:",
+        "main:stats": "Stats of user {name}:\nYou played {total} games, out of which you won {wins}.\nYour winrate is {winrate:.2f}%.\n\n<i>P.S.. Games against the bot are not counted.</i>",
         "white-checkmated": "Game over: {name} is checkmated!",
         "black-checkmated": "Game over: {name} is checkmated!",
         "white-resigned": "Game over: {name} resigned.",
@@ -55,13 +57,14 @@
         "stalemate-draw": "Game over: the side to move doesn't have any legal moves and is not in check.",
         "insufficient-material-draw": "Game over: both sides don't have enough pieces to deliver checkmate.",
         "visualization-error": "An error occured during visualization of the game: could not create video.",
+        "logic-error": "An error occured in the game logic; the game is aborted.",
         "draw": "Game over: both sides agreed to a draw.",
         "winner": "The winner is {name}",
         "is-draw": "It's a Draw!",
         "n-moves": "Moves: {n}",
         "curr-move": "Move {n}",
         "player-in-check": "You are in check!",
-        "opponent-in-check": "{name} is in check",
+        "opponent-in-check": "{name} is in check.",
         "player-to-move": "Choose an action:",
         "player-to-choose-piece": "Choose a piece to move:",
         "player-to-choose-dest": "Choose new place for the piece:",
@@ -98,7 +101,8 @@
     "ru": {
         "main:cmds": {
             "/chess": "Играть в шахматы",
-            "/settings": "Настройки бота, такие как анонимный режим и т.д."
+            "/settings": "Настройки бота, такие как анонимный режим и т.д.",
+            "/stats": "Статистика пользователя в боте."
         },
         "main:unknown-cmd": "Неизвестная команда. Может, вы имели ввиду {suggested}?",
         "main:start-msg": "Привет! Чтобы играть, введите команду /chess",
@@ -141,6 +145,7 @@
         "main:invite-accepted": "Вызов от {name} принят",
         "main:invite-sent": "Вызов отправлен",
         "main:options-title": "Настройки партии:",
+        "main:stats": "Статистика пользователя {name}:\nВы сыграли {total} партий*, из которых выиграли {wins}.\n\n<i>P.S.. Партии против бота не учитываются.</i>",
         "white-checkmated": "Игра окончена: Игроку {name} обьявлен мат!",
         "black-checkmated": "Игра окончена: Игроку {name} обьявлен мат!",
         "white-resigned": "Игра окончена: {name} сдался(-ась).",
@@ -150,12 +155,13 @@
         "stalemate-draw": "Игра окончена: сторона, одна из сторон не имеет легальных ходов и не находится под шахом.",
         "insufficient-material-draw": "Игра окончена: у обеих сторон недостаточно фигур чтобы поставить мат.",
         "visualization-error": "Произошла ошибка при визуализации партии: не удалось создать видео.",
+        "logic-error": "Произошла ошибка в логике игры; партия прервана.",
         "winner": "Победитель: {name}",
         "is-draw": "Ничья!",
         "n-moves": "Ходов: {n}",
         "curr-move": "Ход {n}",
         "player-in-check": "Вам поставлен шах!",
-        "opponent-in-check": "{name} под шахом",
+        "opponent-in-check": "Игроку {name} поставлен шах.",
         "player-to-move": "Выберите действие:",
         "player-to-choose-piece": "Выберите фигуру:",
         "player-to-choose-dest": "Выберите новое место для фигуры:",

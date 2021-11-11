@@ -318,7 +318,7 @@ class ChessEngine:
 
     def get_move(self, *args, **kwargs) -> Move:
         res = self.get_moves(*args, **kwargs)
-        return res[random.choice(self.move_probabilities)]["pv"][0]
+        return res[max(len(res) - 1, random.choice(self.move_probabilities))]["pv"][0]
 
     def eval_position_static(self, board: BoardInfo) -> EvalScore:
         self._process.stdin.write(f"position fen {board.get_fen()}\neval\n")
