@@ -10,7 +10,7 @@ from telegram.utils import helpers
 from telegram import Bot, Update, User
 
 TelegramCallback = Callable[[Update, CallbackContext], None]
-database = None
+database: object = None
 dispatcher: Dispatcher = None
 
 class DefaultTable(dict):
@@ -54,7 +54,14 @@ class InlineMessage:
 def set_dispatcher(dp: Dispatcher):
     global dispatcher, database
     dispatcher = dp
+    print(dispatcher)
     database = dispatcher.bot_data["conn"]
+
+def get_dispatcher() -> Dispatcher:
+    return dispatcher
+
+def get_database() -> object:
+    return database
 
 
 def format_callback_data(

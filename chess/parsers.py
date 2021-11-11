@@ -2,7 +2,7 @@ import re
 from typing import Generator, Iterable, Optional
 from .core import BoardInfo, Move, GameState
 from .utils import _reversed, STARTPOS
-from .base import dispatcher
+from .base import get_dispatcher
 
 
 def get_moves(boards: list["BoardInfo"]) -> Generator["Move", None, None]:
@@ -131,7 +131,7 @@ class PGNParser:
     ):
         std_headers = {
             "Event": "Online Chess on Telegram",
-            "Site": dispatcher.bot.link,
+            "Site": get_dispatcher().bot.link,
             "Date": date,
             "Round": "-",
             "White": white_name,

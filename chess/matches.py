@@ -181,7 +181,8 @@ class BaseMatch:
             return core.GameState.STALEMATE_DRAW
 
         pawns, knights, bishops, rooks, queens = [
-            self.boards[-1][cls] for cls in (core.Pawn, core.Knight, core.Bishop, core.Rook, core.Queen)
+            self.boards[-1][cls]
+            for cls in (core.Pawn, core.Knight, core.Bishop, core.Rook, core.Queen)
         ]
         if not rooks and not queens and not pawns:
             if any(
@@ -198,17 +199,20 @@ class BaseMatch:
 
         return core.GameState.NORMAL
 
-    def _send_analysis_video(self: Union["GroupMatch", "PMMatch"], lang_code: str, text: str):
+    def _send_analysis_video(
+        self: Union["GroupMatch", "PMMatch"], lang_code: str, text: str
+    ):
         try:
-            analyser = analysis.ChessEngine(BaseMatch.ENGINE_FILENAME, default_eval_depth=18)
+            analyser = analysis.ChessEngine(
+                BaseMatch.ENGINE_FILENAME, default_eval_depth=18
+            )
             video, thumb = media.board_video(self, lang_code, analyser=analyser)
             logging.info("Analysis video created")
 
-
             new_msg = InputMediaVideo(
-                base.get_tempfile_url(video, "video/mp4"), 
-                caption=text, 
-                thumb=base.get_tempfile_url(thumb, "image/jpeg")
+                base.get_tempfile_url(video, "video/mp4"),
+                caption=text,
+                thumb=base.get_tempfile_url(thumb, "image/jpeg"),
             )
             self.db.set(
                 f"{self.id}:pgn",
@@ -277,12 +281,17 @@ class BaseMatch:
                     self.player_msg = self.player_msg.edit_caption(caption=text)
                 if self.opponent_msg:
                     self.opponent_msg = self.opponent_msg.edit_caption(caption=text)
-            
 
         if not isinstance(self, AIMatch):
-            if self.state in (core.GameState.BLACK_CHECKMATED, core.GameState.BLACK_RESIGNED):
+            if self.state in (
+                core.GameState.BLACK_CHECKMATED,
+                core.GameState.BLACK_RESIGNED,
+            ):
                 base.set_result(self.id, {self.player1: True, self.player2: False})
-            elif self.state in (core.GameState.WHITE_CHECKMATED, core.GameState.WHITE_RESIGNED):
+            elif self.state in (
+                core.GameState.WHITE_CHECKMATED,
+                core.GameState.WHITE_RESIGNED,
+            ):
                 base.set_result(self.id, {self.player1: False, self.player2: True})
             elif self.state == core.GameState.ABORTED:
                 base.set_result(self.id, {})
@@ -316,7 +325,9 @@ class BaseMatch:
                 ]
             )
         else:
-            title_text = base.langtable[lang_code][self.state.name.lower().replace("_", "-")]
+            title_text = base.langtable[lang_code][
+                self.state.name.lower().replace("_", "-")
+            ]
             text = "\n".join(
                 [
                     title_text,
@@ -466,19 +477,24 @@ class GroupMatch(BaseMatch):
                     name=self.db.get_name(player)
                 )
 
-            self.init_msg_text += langtable["opponent-to-move"].format(name=self.db.get_name(player))
+            self.init_msg_text += langtable["opponent-to-move"].format(
+                name=self.db.get_name(player)
+            )
             self.init_msg_text += "; " + langtable["player-to-move"]
 
-            keyboard = self._keyboard(
-                [
-                    {"text": langtable["move-button"], "data": ["TURN"]},
-                    {
-                        "text": langtable["resign-button"],
-                        "data": ["RESIGN"],
-                    },
-                ],
-                expected_uid=player.id,
-            )
+            piece_buttons = [{"text": langtable["other-actions-button"], "data": ["OTHER"]}]
+            for piece in self.pieces[0]:
+                if piece.get_moves():
+                    piece_buttons.append(
+                        {
+                            "text": langtable["piece-desc"].format(
+                                piece=core.PGNSYMBOLS["emoji"][type(piece).__name__] 
+                                + langtable[type(piece).__name__.lower()],
+                                pos=str(piece.pos),
+                            ),
+                            "data": ["CHOOSE_PIECE", str(piece.pos)],
+                        }
+                    )
             self.msg = self.msg.edit_media(
                 media=InputMediaPhoto(
                     base.get_tempfile_url(
@@ -488,22 +504,28 @@ class GroupMatch(BaseMatch):
                             player1_name=self.db.get_name(self.player1),
                             player2_name=self.db.get_name(self.player2),
                         ),
-                        "image/jpeg"
+                        "image/jpeg",
                     ),
                     caption=self.init_msg_text,
                 ),
-                reply_markup=keyboard,
+                reply_markup=self._keyboard(piece_buttons, expected_uid=player.id, head_item=True),
             )
 
-    def handle_input(self, command: str, args: list[Union[str, int, None]]) -> Optional[dict]:
+    def handle_input(
+        self, command: str, args: list[Union[str, int, None]]
+    ) -> Optional[dict]:
         try:
             player, opponent = self.players
             langtable = base.langtable[player.language_code]
             allies, _ = self.pieces
 
-            if command == "INIT_MSG":
+            if command == "OTHER":
+                new_text = self.init_msg_text.split("\n")
+                new_text[-1] = langtable["opponent-to-choose-action"].format(
+                    name=self.db.get_name(player)
+                )
                 self.msg = self.msg.edit_caption(
-                    caption=self.init_msg_text,
+                    caption="\n".join(new_text),
                     reply_markup=self._keyboard(
                         [
                             {"text": langtable["move-button"], "data": ["TURN"]},
@@ -516,25 +538,20 @@ class GroupMatch(BaseMatch):
                     ),
                 )
 
-            if command == "TURN":
-                piece_buttons = [{"text": langtable["back-button"], "data": ["INIT_MSG"]}]
+            elif command == "TURN":
+                piece_buttons = [{"text": langtable["other-actions-button"], "data": ["OTHER"]}]
                 for piece in allies:
                     if piece.get_moves():
                         piece_buttons.append(
                             {
                                 "text": langtable["piece-desc"].format(
-                                    piece=langtable[type(piece).__name__.lower()],
+                                    piece=core.PGNSYMBOLS[type(piece).__name__]
+                                + langtable[type(piece).__name__.lower()],
                                     pos=str(piece.pos),
                                 ),
                                 "data": ["CHOOSE_PIECE", str(piece.pos)],
                             }
                         )
-
-                new_text = self.init_msg_text.split("\n")
-                new_text[-1] = langtable["opponent-to-move"].format(
-                    name=self.db.get_name(player)
-                )
-                new_text[-1] += "; " + langtable["player-to-choose-piece"]
 
                 self.msg = self.msg.edit_media(
                     media=InputMediaPhoto(
@@ -547,13 +564,19 @@ class GroupMatch(BaseMatch):
                             ),
                             "image/jpeg",
                         ),
-                        caption="\n".join(new_text),
+                        caption=self.init_msg_text,
                     ),
-                    reply_markup=self._keyboard(piece_buttons, expected_uid=player.id, head_item=True),
+                    reply_markup=self._keyboard(
+                        piece_buttons, expected_uid=player.id, head_item=True
+                    ),
                 )
 
             elif command == "RESIGN":
-                self.state = core.GameState.WHITE_RESIGNED if self.boards[-1].is_white_turn else core.GameState.BLACK_RESIGNED
+                self.state = (
+                    core.GameState.WHITE_RESIGNED
+                    if self.boards[-1].is_white_turn
+                    else core.GameState.BLACK_RESIGNED
+                )
                 self.send_analysis_video(opponent.language_code)
 
             elif command == "CHOOSE_PIECE":
@@ -578,7 +601,9 @@ class GroupMatch(BaseMatch):
                 new_text = self.init_msg_text.split("\n")
                 new_text[-1] = "; ".join(
                     [
-                        langtable["opponent-to-move"].format(name=self.db.get_name(player)),
+                        langtable["opponent-to-move"].format(
+                            name=self.db.get_name(player)
+                        ),
                         langtable["player-to-choose-dest"],
                     ]
                 )
@@ -598,13 +623,17 @@ class GroupMatch(BaseMatch):
                         ),
                         caption="\n".join(new_text),
                     ),
-                    reply_markup=self._keyboard(dest_buttons, expected_uid=player.id, head_item=True),
+                    reply_markup=self._keyboard(
+                        dest_buttons, expected_uid=player.id, head_item=True
+                    ),
                 )
 
             elif command == "PROMOTION_MENU":
                 src = utils.BoardPoint(args[0])
                 dst = utils.BoardPoint(args[1])
-                move = core.Move.from_piece(self.boards[-1][src], dst, new_piece=core.Queen)
+                move = core.Move.from_piece(
+                    self.boards[-1][src], dst, new_piece=core.Queen
+                )
                 pieces = [
                     {
                         "text": langtable["queen"],
@@ -626,7 +655,9 @@ class GroupMatch(BaseMatch):
                 new_text = self.init_msg_text.split("\n")
                 new_text[-1] = "; ".join(
                     [
-                        langtable["opponent-to-move"].format(name=self.db.get_name(player)),
+                        langtable["opponent-to-move"].format(
+                            name=self.db.get_name(player)
+                        ),
                         langtable["player-to-promote"],
                     ]
                 )
@@ -786,7 +817,9 @@ class PMMatch(BaseMatch):
         if self.state not in (core.GameState.NORMAL, core.GameState.CHECK):
             self.send_analysis_video(player.language_code)
         else:
-            self.init_msg_text = player_langtable["curr-move"].format(n=self.boards[-1].turn)
+            self.init_msg_text = player_langtable["curr-move"].format(
+                n=self.boards[-1].turn
+            )
             opponent_msg = opponent_langtable["curr-move"].format(
                 n=self.boards[-1].turn
             )
@@ -804,16 +837,19 @@ class PMMatch(BaseMatch):
             )
             self.init_msg_text += player_langtable["player-to-move"]
 
-            keyboard = self._keyboard(
-                [
-                    {"text": player_langtable["move-button"], "data": ["TURN"]},
-                    {
-                        "text": player_langtable["resign-button"],
-                        "data": ["RESIGN"],
-                    },
-                ],
-                expected_uid=player.id,
-            )
+            piece_buttons = [{"text": player_langtable["other-actions-button"], "data": ["OTHER"]}]
+            for piece in self.pieces[0]:
+                if piece.get_moves():
+                    piece_buttons.append(
+                        {
+                            "text": player_langtable["piece-desc"].format(
+                                piece=core.PGNSYMBOLS["emoji"][type(piece).__name__]
+                                + player_langtable[type(piece).__name__.lower()],
+                                pos=str(piece.pos),
+                            ),
+                            "data": ["CHOOSE_PIECE", str(piece.pos)],
+                        }
+                    )
             if self.player_msg:
                 self.player_msg = self.player_msg.edit_media(
                     media=InputMediaPhoto(
@@ -828,7 +864,7 @@ class PMMatch(BaseMatch):
                         ),
                         caption=self.init_msg_text,
                     ),
-                    reply_markup=keyboard,
+                    reply_markup=self._keyboard(piece_buttons, expected_uid=player.id, head_item=True),
                 )
 
             if self.opponent_msg:
@@ -847,11 +883,48 @@ class PMMatch(BaseMatch):
                     )
                 )
 
-    def handle_input(self, command: str, args: list[Union[str, int, None]]) -> Optional[dict]:
+    def handle_input(
+        self, command: str, args: list[Union[str, int, None]]
+    ) -> Optional[dict]:
         player, opponent = self.players
         langtable = base.langtable[player.language_code]
         allies, _ = self.pieces
-        if command == "INIT_MSG":
+        if command == "OTHER":
+            new_text = self.init_msg_text.split("\n")
+            new_text[-1] = langtable["player-to-choose-action"]
+            self.player_msg = self.player_msg.edit_caption(
+                caption="\n".join(new_text),
+                reply_markup=self._keyboard(
+                    [
+                        {"text": langtable["back-button"], "data": ["TURN"]},
+                        {
+                            "text": langtable["resign-button"],
+                            "data": ["RESIGN"],
+                        },
+                        {
+                            "text": langtable["draw-offer-button"],
+                            "data": ["OFFER_DRAW"]
+                        }
+                    ],
+                    expected_uid=player.id,
+                ),
+            )
+
+        if command == "TURN":
+            piece_buttons = [{"text": langtable["other-actions-button"], "data": ["OTHER"]}]
+            for piece in allies:
+                if piece.get_moves():
+                    piece_buttons.append(
+                        {
+                            "text": langtable["piece-desc"].format(
+                                piece=core.PGNSYMBOLS["emoji"][type(piece).__name__]
+                                + langtable[type(piece).__name__.lower()],
+                                pos=str(piece.pos),
+                            ),
+                            "data": ["CHOOSE_PIECE", str(piece.pos)],
+                        }
+                    )
+
             self.player_msg = self.player_msg.edit_media(
                 media=InputMediaPhoto(
                     base.get_tempfile_url(
@@ -866,52 +939,16 @@ class PMMatch(BaseMatch):
                     caption=self.init_msg_text,
                 ),
                 reply_markup=self._keyboard(
-                    [
-                        {"text": langtable["move-button"], "data": ["TURN"]},
-                        {
-                            "text": langtable["resign-button"],
-                            "data": ["RESIGN"],
-                        },
-                    ],
-                    expected_uid=player.id,
+                    piece_buttons, expected_uid=player.id, head_item=True
                 ),
-            )
-
-        if command == "TURN":
-            piece_buttons = [{"text": langtable["back-button"], "data": ["INIT_MSG"]}]
-            for piece in allies:
-                if piece.get_moves():
-                    piece_buttons.append(
-                        {
-                            "text": langtable["piece-desc"].format(
-                                piece=langtable[type(piece).__name__.lower()],
-                                pos=str(piece.pos),
-                            ),
-                            "data": ["CHOOSE_PIECE", str(piece.pos)],
-                        }
-                    )
-
-            new_text = self.init_msg_text.split("\n")
-            new_text[-1] = langtable["player-to-choose-piece"]
-
-            self.player_msg = self.player_msg.edit_media(
-                media=InputMediaPhoto(
-                    base.get_tempfile_url(
-                        media.board_image(
-                            player.language_code,
-                            self.boards,
-                            player1_name=self.db.get_name(self.player1),
-                            player2_name=self.db.get_name(self.player2),
-                        ),
-                        "image/jpeg",
-                    ),
-                    caption="\n".join(new_text),
-                ),
-                reply_markup=self._keyboard(piece_buttons, expected_uid=player.id, head_item=True),
             )
 
         elif command == "RESIGN":
-            self.state = core.GameState.WHITE_RESIGNED if self.boards[-1].is_white_turn else core.GameState.BLACK_RESIGNED
+            self.state = (
+                core.GameState.WHITE_RESIGNED
+                if self.boards[-1].is_white_turn
+                else core.GameState.BLACK_RESIGNED
+            )
             self.send_analysis_video(player.language_code)
 
         elif command == "CHOOSE_PIECE":
@@ -952,7 +989,9 @@ class PMMatch(BaseMatch):
                     ),
                     caption="\n".join(new_text),
                 ),
-                reply_markup=self._keyboard(dest_buttons, expected_uid=player.id, head_item=True),
+                reply_markup=self._keyboard(
+                    dest_buttons, expected_uid=player.id, head_item=True
+                ),
             )
 
         elif command == "PROMOTION_MENU":

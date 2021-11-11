@@ -842,21 +842,28 @@ def button_callback(update: tg.Update, context: BoardGameContext) -> Optional[tu
             challenge = context.db.get_invite(args["args"][0])
             logging.info(f"invite {args['args'][0]}: {challenge}")
             if challenge:
-                new = core.GroupMatch(
-                    player1=challenge["from_user"],
-                    player2=update.effective_user,
-                    msg=core.InlineMessage(
-                        update.callback_query.inline_message_id, context.bot
-                    ),
-                    options=challenge["options"],
-                    dispatcher=context.dispatcher,
-                )
-                context.bot_data["matches"][new.id] = new
-                new.init_turn()
+                try:
+                    new = core.GroupMatch(
+                        player1=challenge["from_user"],
+                        player2=update.effective_user,
+                        msg=core.InlineMessage(
+                            update.callback_query.inline_message_id, context.bot
+                        ),
+                        options=challenge["options"],
+                        dispatcher=context.dispatcher,
+                    )
+                    context.bot_data["matches"][new.id] = new
+                    new.init_turn()
+                except BaseException as exc:
+                    context.dispatcher.dispatch_error(update, exc)
+                    context.bot.edit_message_caption(
+                        inline_message_id=update.callback_query.inline_message_id,
+                        caption=context.langtable["main:init-error"]
+                    )
             else:
                 context.bot.edit_message_text(
                     inline_message_id=update.callback_query.inline_message_id,
-                    text=context.langtable["main:error-msg"],
+                    text=context.langtable["main:invite-not-found"],
                 )
 
         else:

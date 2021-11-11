@@ -28,7 +28,7 @@ from .parsers import PGNParser, CGNParser, get_moves
 
 def init(is_debug: bool):
     BaseMatch.ENGINE_FILENAME = "./stockfish" if is_debug else "./stockfish_14_x64"
-    BaseMatch.db = base.database
+    BaseMatch.db = get_database()
 
 
 OPTIONS = {
