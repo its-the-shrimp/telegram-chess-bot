@@ -82,7 +82,9 @@ class PGNParser:
         if line_length:
             encoded = ""
             cur_line = ""
-            for token in res + ([cls.RESULT_CODES[result]] if result is not None else []):
+            for token in res + (
+                [cls.RESULT_CODES[result]] if result is not None else []
+            ):
                 if any(
                     [
                         line_length and len(cur_line + " " + token) > line_length,

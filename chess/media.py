@@ -245,7 +245,11 @@ def _board_image(
             )
             board_img.paste(eval_bar, (522, 385))
 
-    if best_move is not None and move_evaluation not in [MoveEval.BEST, MoveEval.PRECISE, MoveEval.FORCED]:
+    if best_move is not None and move_evaluation not in [
+        MoveEval.BEST,
+        MoveEval.PRECISE,
+        MoveEval.FORCED,
+    ]:
         editor.rectangle(
             (522, 415, 710, 475),
             fill=EVALUATION_COLORS[MoveEval.BEST],
@@ -255,14 +259,14 @@ def _board_image(
             langtable[lang_code]["best-move"],
             fill="white",
             anchor="mm",
-            font=LARGE_FONT
+            font=LARGE_FONT,
         )
         editor.text(
-            (527, 460), 
+            (527, 460),
             best_move.pgn_encode(language_code="emoji"),
             fill="white",
             anchor="lm",
-            font=LARGE_FONT
+            font=LARGE_FONT,
         )
         if best_move_eval is not None:
             editor.text(
@@ -270,7 +274,7 @@ def _board_image(
                 str(best_move_eval),
                 fill="white",
                 anchor="rm",
-                font=LARGE_FONT
+                font=LARGE_FONT,
             )
 
     array = numpy.array(board_img)
@@ -342,7 +346,7 @@ def board_video(
             move_evaluation=move_eval,
             best_move=best_move,
             pos_evaluation=analyser.eval_position(move) if move and analyser else None,
-            best_move_eval=best_move_eval
+            best_move_eval=best_move_eval,
         )
 
         for i in range(15):

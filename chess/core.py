@@ -435,7 +435,9 @@ class Move:
                 piece.pos,
                 dst,
                 type(piece),
-                rook_src=piece.kingside_rook_pos if dst.file == 6 else piece.queenside_rook_pos
+                rook_src=piece.kingside_rook_pos
+                if dst.file == 6
+                else piece.queenside_rook_pos,
             )
         if piece.board.enpassant_pos[1] == dst:
             killed_piece = piece.board[piece.board.enpassant_pos[0]]

@@ -166,7 +166,7 @@ class EvalScore:
         (0, -1): True,
         (-1, 1): True,
         (-1, 0): False,
-        (-1, -1): False
+        (-1, -1): False,
     }
 
     @overload
@@ -204,10 +204,10 @@ class EvalScore:
     def __compare(self, other: "EvalScore", side: bool):
         if self.__class__ != other.__class__:
             return NotImplemented
-        
+
         comp = (
             round((self.score - other.score) / abs(self.score - other.score or 1)),
-            (self.mate_in - other.mate_in) // abs(self.mate_in - other.mate_in or 1)
+            (self.mate_in - other.mate_in) // abs(self.mate_in - other.mate_in or 1),
         )
 
         res = self.comparison_map[tuple(comp)]
@@ -265,7 +265,9 @@ class ChessEngine:
                 res[key] = int(res[key])
 
         eval_type, eval_score = res["score"].split("#")
-        res["score"] = EvalScore(int(eval_score) / 100 if eval_type=="cp" else int(eval_score), is_white)
+        res["score"] = EvalScore(
+            int(eval_score) / 100 if eval_type == "cp" else int(eval_score), is_white
+        )
         res["score"].score *= 1 if is_white else -1
         res["score"].mate_in *= 1 if is_white else -1
 
@@ -331,7 +333,9 @@ class ChessEngine:
         res = self.get_moves(move.board, depth, searchmoves=encode_engine_move(move))
         return res[0]["score"]
 
-    def eval_move(self, move: Move, depth: int = None, prev_move: Move = None) -> tuple[MoveEval, Move, EvalScore]:
+    def eval_move(
+        self, move: Move, depth: int = None, prev_move: Move = None
+    ) -> tuple[MoveEval, Move, EvalScore]:
         n_moves = 0
         for piece in move.board.whites if move.is_white else move.board.blacks:
             n_moves += len(piece.get_moves())
@@ -346,22 +350,37 @@ class ChessEngine:
 
         best_line, second_best_line, _ = self.get_moves(move.board, depth)
         if move == best_line["pv"][0]:
-            mark = MoveEval.PRECISE if second_best_line["score"] < prev_eval else MoveEval.BEST
-        
+            mark = (
+                MoveEval.PRECISE
+                if second_best_line["score"] < prev_eval
+                else MoveEval.BEST
+            )
+
         else:
             comp = (
-                round((cur_eval.score - prev_eval.score) / abs(cur_eval.score - prev_eval.score or 1)),
-                (cur_eval.mate_in - prev_eval.mate_in) // abs(cur_eval.mate_in - prev_eval.mate_in or 1)
+                round(
+                    (cur_eval.score - prev_eval.score)
+                    / abs(cur_eval.score - prev_eval.score or 1)
+                ),
+                (cur_eval.mate_in - prev_eval.mate_in)
+                // abs(cur_eval.mate_in - prev_eval.mate_in or 1),
             )
             mark = MoveEval.GOOD
 
-            if comp[0] == comp[1] != 0:   #    (1, 1) or (-1, -1)
-                mark = MoveEval.GREAT if cur_eval.is_white_side == (comp[0] > 0) else MoveEval.BLUNDER
+            if comp[0] == comp[1] != 0:  #    (1, 1) or (-1, -1)
+                mark = (
+                    MoveEval.GREAT
+                    if cur_eval.is_white_side == (comp[0] > 0)
+                    else MoveEval.BLUNDER
+                )
             elif comp == (0, 1):
                 if cur_eval.is_white_side:
                     if prev_eval.mate_in < 0 and cur_eval.mate_in > 0:
                         mark = MoveEval.GREAT
-                    elif prev_eval.mate_in + cur_eval.mate_in < 0 and abs(prev_eval.mate_in - cur_eval.mate_in) >= 5:
+                    elif (
+                        prev_eval.mate_in + cur_eval.mate_in < 0
+                        and abs(prev_eval.mate_in - cur_eval.mate_in) >= 5
+                    ):
                         mark = MoveEval.BLUNDER
                     else:
                         mark = MoveEval.MISTAKE
@@ -370,7 +389,7 @@ class ChessEngine:
                         mark = MoveEval.BLUNDER
                     else:
                         mark = MoveEval.GREAT
-            elif comp[0] * comp[1] == -1: #     (-1, 1) or (1, -1)
+            elif comp[0] * comp[1] == -1:  #     (-1, 1) or (1, -1)
                 if (comp[0] > 0) != cur_eval.is_white_side:
                     mark = MoveEval.GREAT
                 elif cur_eval.mate_in != 0:
@@ -379,14 +398,25 @@ class ChessEngine:
                     mark = MoveEval.MISTAKE
             elif comp[0] != 0 and comp[1] == 0:  #   (-1, 0) or (1, 0)
                 if abs(prev_eval.score - cur_eval.score) > 0.5:
-                    mark = MoveEval.GREAT if cur_eval.is_white_side == prev_eval.score > cur_eval.score else MoveEval.MISTAKE
+                    mark = (
+                        MoveEval.GREAT
+                        if cur_eval.is_white_side == prev_eval.score > cur_eval.score
+                        else MoveEval.MISTAKE
+                    )
                 else:
-                    mark = MoveEval.GOOD if cur_eval.is_white_side == prev_eval.score > cur_eval.score else MoveEval.WEAK
+                    mark = (
+                        MoveEval.GOOD
+                        if cur_eval.is_white_side == prev_eval.score > cur_eval.score
+                        else MoveEval.WEAK
+                    )
             elif comp == (0, -1):
                 if not cur_eval.is_white_side:
                     if prev_eval.mate_in > 0 and cur_eval.mate_in < 0:
                         mark = MoveEval.GREAT
-                    elif prev_eval.mate_in + cur_eval.mate_in < 0 and abs(prev_eval.mate_in - cur_eval.mate_in) >= 5:
+                    elif (
+                        prev_eval.mate_in + cur_eval.mate_in < 0
+                        and abs(prev_eval.mate_in - cur_eval.mate_in) >= 5
+                    ):
                         mark = MoveEval.BLUNDER
                     else:
                         mark = MoveEval.MISTAKE
@@ -397,4 +427,3 @@ class ChessEngine:
                         mark = MoveEval.GREAT
 
         return mark, best_line["pv"][0], best_line["score"]
-            

@@ -17,7 +17,7 @@ try:
     os.mkdir(os.path.join(os.path.dirname(__file__), "images", "temp"))
 except FileExistsError:
     pass
-    
+
 
 def worker_exit(server, _):
     try:

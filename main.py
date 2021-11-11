@@ -51,11 +51,11 @@ class RedisInterface(redis.Redis):
 
     def get_name(self, user: tg.User) -> str:
         """
-If user has enabled anonymous mode, returns "player(ID of the user)", 
-otherwise returns his username, or full name, if no username is available.
-Arguments:
-    user: `User` - User whose name needs to bee queried.
-Returns: `str` - Name of the user.
+        If user has enabled anonymous mode, returns "player(ID of the user)",
+        otherwise returns his username, or full name, if no username is available.
+        Arguments:
+            user: `User` - User whose name needs to bee queried.
+        Returns: `str` - Name of the user.
         """
         if self.exists(f"{user.id}:isanon"):
             return f"player{user.id}"
@@ -105,14 +105,21 @@ Returns: `str` - Name of the user.
                 "lang_code": (self.get(f"{user_id}:lang") or b"en").decode(),
                 "is_anon": bool(self.exists(f"{user_id}:isanon")),
                 "total": int(self.get(f"{user_id}:total") or 0),
-                "wins": int(self.get(f"{user_id}:wins") or 0)
+                "wins": int(self.get(f"{user_id}:wins") or 0),
             }
         else:
             return super().__getitem__(user_id)
-    
+
     def __delitem__(self, user_id: int) -> bool:
         if isinstance(user_id, int):
-            return bool(self.delete(f"{user_id}:lang", f"{user_id}:isanon", f"{user_id}:total", f"{user_id}:wins"))
+            return bool(
+                self.delete(
+                    f"{user_id}:lang",
+                    f"{user_id}:isanon",
+                    f"{user_id}:total",
+                    f"{user_id}:wins",
+                )
+            )
         else:
             return bool(super().__delitem__(user_id))
 
@@ -285,7 +292,10 @@ class MenuFormatter:
         locale = core.langtable[lang_code]
 
         return "\n".join(
-            [locale["main:options-title"], ", ".join([locale[i] for i in indexes.values()])]
+            [
+                locale["main:options-title"],
+                ", ".join([locale[i] for i in indexes.values()]),
+            ]
         )
 
     def tg_encode(self, indexes: dict[str, str]) -> str:
@@ -362,7 +372,7 @@ def flask_callback(*args, **kwargs):
     def decorator(f: Callable) -> Callable:
         flask_callbacks.append((args, kwargs | {"view_func": f}))
         return f
-    
+
     return decorator
 
 
@@ -454,6 +464,7 @@ def settings(update: tg.Update, context: BoardGameContext):
         ),
     )
 
+
 @tg_callback(tg.ext.CommandHandler, "stats")
 def stats(update: tg.Update, context: BoardGameContext):
     try:
@@ -463,9 +474,9 @@ def stats(update: tg.Update, context: BoardGameContext):
                 name=context.db.get_name(update.effective_user),
                 total=user_data["total"],
                 wins=user_data["wins"],
-                winrate=user_data["wins"] / user_data["total"]
+                winrate=user_data["wins"] / user_data["total"],
             ),
-            parse_mode=tg.ParseMode.HTML
+            parse_mode=tg.ParseMode.HTML,
         )
     except BaseException as exc:
         context.dispatcher.dispatch_error(update, exc)
@@ -571,11 +582,7 @@ def button_callback(update: tg.Update, context: BoardGameContext) -> Optional[tu
                     [
                         [
                             tg.InlineKeyboardButton(
-                                text=context.langtable["main:anonmode-button"].format(
-                                    state="🟢"
-                                    if context.db.get_anon_mode(update.effective_user)
-                                    else "🔴"
-                                ),
+                                text=context.langtable["main:anonmode-button"].format(state="🔴"),
                                 callback_data=core.format_callback_data(
                                     "ANON_MODE_ON",
                                     expected_uid=update.effective_user.id,
@@ -596,11 +603,7 @@ def button_callback(update: tg.Update, context: BoardGameContext) -> Optional[tu
                     [
                         [
                             tg.InlineKeyboardButton(
-                                text=context.langtable["main:anonmode-button"].format(
-                                    state="🟢"
-                                    if context.db.get_anon_mode(update.effective_user)
-                                    else "🔴"
-                                ),
+                                text=context.langtable["main:anonmode-button"].format(state="🟢"),
                                 callback_data=core.format_callback_data(
                                     "ANON_MODE_OFF",
                                     handler_id="MAIN",
@@ -627,8 +630,16 @@ def button_callback(update: tg.Update, context: BoardGameContext) -> Optional[tu
                     break
 
             if len(values) > 1:
-                update.effective_message.edit_reply_markup(
-                    context.menu.encode(update.effective_user, indexes=options)
+                notes = []
+                if options["mode"] == "online":
+                    notes.append(context.langtable["main:queue-len"].format(n=len(context.bot_data["queue"])))
+                for value in options.values():
+                    notes += [context.langtable[f"{value}:note"]] if f"{value}:note" in context.langtable else []
+                notes.extend(("", context.langtable["main:game-setup"]))
+
+                update.effective_message.edit_text(
+                    text="\n".join(notes),
+                    reply_markup=context.menu.encode(update.effective_user, indexes=options)
                 )
             update.callback_query.answer(
                 f"{context.langtable['main:chosen-popup']} {context.langtable[key]} - {context.langtable[options[key]]}"
@@ -649,15 +660,28 @@ def button_callback(update: tg.Update, context: BoardGameContext) -> Optional[tu
                     break
 
             if len(values) > 1:
-                update.effective_message.edit_reply_markup(
-                    context.menu.encode(update.effective_user, indexes=options)
+                notes = []
+                if options["mode"] == "online":
+                    notes.append(context.langtable["main:queue-len"].format(n=len(context.bot_data["queue"])))
+                for value in options.values():
+                    notes += [context.langtable[f"{value}:note"]] if f"{value}:note" in context.langtable else []
+                notes.extend(("", context.langtable["main:game-setup"]))
+
+                update.effective_message.edit_text(
+                    text="\n".join(notes),
+                    reply_markup=context.menu.encode(update.effective_user, indexes=options)
                 )
             update.callback_query.answer(
                 f"{context.langtable['main:chosen-popup']} {context.langtable[key]} - {context.langtable[options[key]]}"
             )
 
         elif args["command"] == "DESC":
-            update.callback_query.answer()
+            key = f"{context.menu.get_value(*args['args'])}:desc"
+            print(key)
+            update.callback_query.answer(
+                context.langtable[key] if key in context.langtable else None,
+                show_alert=True
+            )
 
         elif args["command"] == "PLAY":
             options = context.menu.decode(update.effective_message.reply_markup)
@@ -713,11 +737,13 @@ def button_callback(update: tg.Update, context: BoardGameContext) -> Optional[tu
                         new_msg.edit_media(
                             media=tg.InputMediaPhoto(
                                 core.ERROR_IMAGE,
-                                caption=context.langtable["main:init-error"]
+                                caption=context.langtable["main:init-error"],
                             )
                         )
                     else:
-                        new_msg.edit_caption(caption=context.langtable["main:init-error"])
+                        new_msg.edit_caption(
+                            caption=context.langtable["main:init-error"]
+                        )
                     context.dispatcher.dispatch_error(update, exc)
 
             elif options["mode"] == "online":
@@ -751,11 +777,13 @@ def button_callback(update: tg.Update, context: BoardGameContext) -> Optional[tu
                                 new_msg.edit_media(
                                     media=tg.InputMediaPhoto(
                                         core.ERROR_IMAGE,
-                                        caption=context.langtable["main:init-error"]
+                                        caption=context.langtable["main:init-error"],
                                     )
                                 )
                             else:
-                                new_msg.edit_caption(caption=context.langtable["main:init-error"])
+                                new_msg.edit_caption(
+                                    caption=context.langtable["main:init-error"]
+                                )
                             context.dispatcher.dispatch_error(update, exc)
 
                     else:
@@ -780,12 +808,19 @@ def button_callback(update: tg.Update, context: BoardGameContext) -> Optional[tu
                         except BaseException as exc:
                             del context.bot_data["matches"][new.id]
                             if hasattr(core, "ERROR_IMAGE"):
-                                media = tg.InputMediaPhoto(core.ERROR_IMAGE, context.langtable["main:init-error"])
+                                media = tg.InputMediaPhoto(
+                                    core.ERROR_IMAGE,
+                                    context.langtable["main:init-error"],
+                                )
                                 new_msg.edit_media(media=media)
                                 opponent_msg.edit_media(media=media)
                             else:
-                                new_msg.edit_caption(caption=context.langtable["main:init-error"])
-                                opponent_msg.edit_caption(caption=context.langtable["main:init-error"])
+                                new_msg.edit_caption(
+                                    caption=context.langtable["main:init-error"]
+                                )
+                                opponent_msg.edit_caption(
+                                    caption=context.langtable["main:init-error"]
+                                )
 
                 else:
                     context.bot_data["queue"].append(
@@ -858,7 +893,7 @@ def button_callback(update: tg.Update, context: BoardGameContext) -> Optional[tu
                     context.dispatcher.dispatch_error(update, exc)
                     context.bot.edit_message_caption(
                         inline_message_id=update.callback_query.inline_message_id,
-                        caption=context.langtable["main:init-error"]
+                        caption=context.langtable["main:init-error"],
                     )
             else:
                 context.bot.edit_message_text(
@@ -883,6 +918,7 @@ def button_callback(update: tg.Update, context: BoardGameContext) -> Optional[tu
             update.callback_query.answer(
                 text=context.langtable["main:game-not-found-error"]
             )
+
 
 @flask_callback(f"/{os.environ['BOT_TOKEN']}/send-update", methods=["POST"])
 def process_update():
@@ -915,7 +951,7 @@ def create_app() -> TelegramBotApp:
     )
 
     dispatcher = tg.ext.Dispatcher(
-        tg.Bot(os.environ["BOT_TOKEN"], defaults=tg.ext.Defaults(quote=True)),
+        tg.ext.ExtBot(os.environ["BOT_TOKEN"], defaults=tg.ext.Defaults(quote=True)),
         queue.Queue(),
         context_types=tg.ext.ContextTypes(context=BoardGameContext),
     )
@@ -1021,7 +1057,9 @@ if __name__ == "__main__":
                 all_users = 0
                 for uid in conn.get_user_ids():
                     userdata = conn.get_user_data()
-                    langcodes[userdata["lang_code"]] = langcodes.get(userdata["lang_code"], 0) + 1
+                    langcodes[userdata["lang_code"]] = (
+                        langcodes.get(userdata["lang_code"], 0) + 1
+                    )
                     all_users += 1
                 for lang_code, n in langcodes.items():
                     print(f"  {lang_code}: {n}")

@@ -54,5 +54,7 @@ OPTIONS = {
         "condition": lambda obj: obj["mode"] == "vsbot",
     },
 }
-KEYBOARD_COMMANDS: dict[str, Callable[[Update, CallbackContext, list[Union[str, int]]], None]] = {"DOWNLOAD": get_pgn_file}
+KEYBOARD_COMMANDS: dict[
+    str, Callable[[Update, CallbackContext, list[Union[str, int]]], None]
+] = {"DOWNLOAD": get_pgn_file}
 INVITE_IMAGE = "https://raw.githubusercontent.com/schvv31n/telegram-chess-bot/master/images/static/inline-thumb.jpg"

@@ -346,7 +346,7 @@ class BaseMatch:
                 text,
             ),
         )
-        eval_thread.start()
+
         last_boardimg = InputMediaPhoto(
             base.get_tempfile_url(
                 media.board_image(
@@ -371,6 +371,7 @@ class BaseMatch:
                 self.player_msg = self.player_msg.edit_media(last_boardimg)
             if self.opponent_msg:
                 self.opponent_msg = self.opponent_msg.edit_media(last_boardimg)
+        eval_thread.start()
 
     def init_turn(self, move: core.Move = None) -> None:
         logging.debug("Move made: " + (move.pgn_encode() if move else ""))
@@ -480,15 +481,17 @@ class GroupMatch(BaseMatch):
             self.init_msg_text += langtable["opponent-to-move"].format(
                 name=self.db.get_name(player)
             )
-            self.init_msg_text += "; " + langtable["player-to-move"]
+            self.init_msg_text += "\n" + langtable["player-to-move"]
 
-            piece_buttons = [{"text": langtable["other-actions-button"], "data": ["OTHER"]}]
+            piece_buttons = [
+                {"text": langtable["other-actions-button"], "data": ["OTHER"]}
+            ]
             for piece in self.pieces[0]:
                 if piece.get_moves():
                     piece_buttons.append(
                         {
                             "text": langtable["piece-desc"].format(
-                                piece=core.PGNSYMBOLS["emoji"][type(piece).__name__] 
+                                piece=core.PGNSYMBOLS["emoji"][type(piece).__name__]
                                 + langtable[type(piece).__name__.lower()],
                                 pos=str(piece.pos),
                             ),
@@ -508,7 +511,9 @@ class GroupMatch(BaseMatch):
                     ),
                     caption=self.init_msg_text,
                 ),
-                reply_markup=self._keyboard(piece_buttons, expected_uid=player.id, head_item=True),
+                reply_markup=self._keyboard(
+                    piece_buttons, expected_uid=player.id, head_item=True
+                ),
             )
 
     def handle_input(
@@ -521,32 +526,37 @@ class GroupMatch(BaseMatch):
 
             if command == "OTHER":
                 new_text = self.init_msg_text.split("\n")
-                new_text[-1] = langtable["opponent-to-choose-action"].format(
-                    name=self.db.get_name(player)
-                )
+                new_text[-1] = langtable["player-to-choose-action"]
                 self.msg = self.msg.edit_caption(
                     caption="\n".join(new_text),
                     reply_markup=self._keyboard(
                         [
-                            {"text": langtable["move-button"], "data": ["TURN"]},
+                            {"text": langtable["back-button"], "data": ["TURN"]},
                             {
                                 "text": langtable["resign-button"],
                                 "data": ["RESIGN"],
                             },
+                            {
+                                "text": langtable["draw-offer-button"],
+                                "data": ["OFFERDRAW"],
+                            },
                         ],
                         expected_uid=player.id,
+                        head_item=True
                     ),
                 )
 
             elif command == "TURN":
-                piece_buttons = [{"text": langtable["other-actions-button"], "data": ["OTHER"]}]
+                piece_buttons = [
+                    {"text": langtable["other-actions-button"], "data": ["OTHER"]}
+                ]
                 for piece in allies:
                     if piece.get_moves():
                         piece_buttons.append(
                             {
                                 "text": langtable["piece-desc"].format(
-                                    piece=core.PGNSYMBOLS[type(piece).__name__]
-                                + langtable[type(piece).__name__.lower()],
+                                    piece=core.PGNSYMBOLS["emoji"][type(piece).__name__]
+                                    + langtable[type(piece).__name__.lower()],
                                     pos=str(piece.pos),
                                 ),
                                 "data": ["CHOOSE_PIECE", str(piece.pos)],
@@ -837,7 +847,9 @@ class PMMatch(BaseMatch):
             )
             self.init_msg_text += player_langtable["player-to-move"]
 
-            piece_buttons = [{"text": player_langtable["other-actions-button"], "data": ["OTHER"]}]
+            piece_buttons = [
+                {"text": player_langtable["other-actions-button"], "data": ["OTHER"]}
+            ]
             for piece in self.pieces[0]:
                 if piece.get_moves():
                     piece_buttons.append(
@@ -864,7 +876,9 @@ class PMMatch(BaseMatch):
                         ),
                         caption=self.init_msg_text,
                     ),
-                    reply_markup=self._keyboard(piece_buttons, expected_uid=player.id, head_item=True),
+                    reply_markup=self._keyboard(
+                        piece_buttons, expected_uid=player.id, head_item=True
+                    ),
                 )
 
             if self.opponent_msg:
@@ -903,15 +917,18 @@ class PMMatch(BaseMatch):
                         },
                         {
                             "text": langtable["draw-offer-button"],
-                            "data": ["OFFER_DRAW"]
-                        }
+                            "data": ["OFFER_DRAW"],
+                        },
                     ],
                     expected_uid=player.id,
+                    head_item=True
                 ),
             )
 
         if command == "TURN":
-            piece_buttons = [{"text": langtable["other-actions-button"], "data": ["OTHER"]}]
+            piece_buttons = [
+                {"text": langtable["other-actions-button"], "data": ["OTHER"]}
+            ]
             for piece in allies:
                 if piece.get_moves():
                     piece_buttons.append(
