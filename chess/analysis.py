@@ -1,24 +1,18 @@
 import subprocess
 import random
-import itertools
 import functools
-from typing import Union, overload
+from typing import Optional, Sequence, Union, TypedDict
 from .utils import BoardPoint
-from .core import Move, BoardInfo, King, MoveEval
+from .core import Move, BoardInfo, MoveEval
 
-IDEAL_N_CTRL_POS = {
-    "Pawn": 2,
-    "Knight": 8,
-    "Bishop": 14,
-    "Rook": 14,
-    "Queen": 28,
-    "King": 8,
-}
+EngineResponse = TypedDict("EngineResponse", {"moves": list[Move], "depth": int, "multipv": int, "score": "EvalScore"})
 
 
 def decode_engine_move(raw: str, board: BoardInfo) -> Move:
+    piece = board[BoardPoint(raw[:2])]
+    assert piece is not None, f"{raw}"
     return Move.from_piece(
-        board[BoardPoint(raw[:2])],
+        piece,
         BoardPoint(raw[2:4]),
         new_piece=BoardInfo.FENSYMBOLS[raw[4]] if len(raw) == 5 else None,
     )
@@ -26,134 +20,7 @@ def decode_engine_move(raw: str, board: BoardInfo) -> Move:
 
 def encode_engine_move(move: Move) -> str:
     res = str(move.src) + str(move.dst)
-    return res + (move.new_piece.fen_symbol[0] if move.new_piece else "")
-
-
-def eval_piece_activity(board: BoardInfo) -> float:
-    white_value = 0.0
-    black_value = 0.0
-    all_white_moves = tuple(
-        itertools.chain(
-            *[
-                map(
-                    lambda x: x.dst,
-                    filter(
-                        Move.is_legal,
-                        piece.get_moves(all=True, only_capturing=True),
-                    ),
-                )
-                for piece in board.whites
-            ]
-        )
-    )
-    all_black_moves = tuple(
-        itertools.chain(
-            *[
-                map(
-                    lambda x: x.dst,
-                    filter(
-                        Move.is_legal,
-                        piece.get_moves(all=True, only_capturing=True),
-                    ),
-                )
-                for piece in board.blacks
-            ]
-        )
-    )
-
-    for piece in board.board:
-        if type(piece) == King:
-            continue
-        n_controlled_pos = 0
-        for move in filter(
-            Move.is_legal, piece.get_moves(all=True, only_capturing=True)
-        ):
-            enemy_moves = all_black_moves if piece.is_white else all_white_moves
-            existing_piece = board[move.dst]
-            if existing_piece:
-                if move.dst in enemy_moves:
-                    n_controlled_pos += 2
-                elif existing_piece.is_white != piece.is_white:
-                    n_controlled_pos += 5 - enemy_moves.count(move.dst)
-
-            else:
-                n_controlled_pos += 1
-
-        if piece.is_white:
-            white_value += piece.value * (
-                n_controlled_pos / IDEAL_N_CTRL_POS[type(piece).__name__]
-            )
-        else:
-            black_value += piece.value * (
-                n_controlled_pos / IDEAL_N_CTRL_POS[type(piece).__name__]
-            )
-
-    res = white_value - black_value
-    if res > 0:
-        if black_value:
-            return res / black_value * 100
-        return 100.0
-    elif res < 0:
-        if white_value:
-            return res / white_value * 100
-        return -100.0
-    else:
-        return 0.0
-
-
-def eval_pieces_defense(board: BoardInfo) -> dict[BoardPoint, float]:
-    all_white_moves = tuple(
-        itertools.chain(
-            *[
-                filter(
-                    Move.is_legal,
-                    piece.get_moves(all=True, only_capturing=True),
-                )
-                for piece in board.whites
-            ]
-        )
-    )
-    all_black_moves = tuple(
-        itertools.chain(
-            *[
-                filter(
-                    Move.is_legal,
-                    piece.get_moves(all=True, only_capturing=True),
-                )
-                for piece in board.blacks
-            ]
-        )
-    )
-    whites_value_sum = len([piece.value for piece in board.whites])
-    blacks_value_sum = sum([piece.value for piece in board.blacks])
-
-    res = {}
-    for file in range(8):
-        for rank in range(8):
-            pos = BoardPoint(file, rank)
-            if board[pos]:
-                res[pos] = len([i.piece.value for i in all_white_moves if i.dst == pos])
-                res[pos] -= len(
-                    [i.piece.value for i in all_black_moves if i.dst == pos]
-                )
-
-                if res[pos] > 0:
-                    res[pos] /= blacks_value_sum
-                elif res[pos] < 0:
-                    res[pos] /= whites_value_sum
-                else:
-                    res[pos] = 0.0
-
-    return res
-
-
-def eval_position_exp(board: BoardInfo) -> float:
-    defense_score = tuple(eval_pieces_defense(board).values())
-    defense_score = sum(defense_score) / len(defense_score)
-    activity_score = eval_piece_activity(board)
-    print("activity", activity_score, "defense", defense_score)
-
-    return round((defense_score + activity_score) / 2, 2)
+    return res + (move.new_piece.fen_symbols[0] if move.new_piece else "")
 
 
 class EvalScore:
@@ -169,15 +36,7 @@ class EvalScore:
         (-1, -1): False,
     }
 
-    @overload
-    def __init__(self, eval_score: float, is_white_side: bool):
-        ...
-
-    @overload
-    def __init__(self, mate_in: int, is_white_side: bool):
-        ...
-
-    def __init__(self, arg, is_white_side: bool):
+    def __init__(self, arg: Union[int ,float], is_white_side: bool):
         if isinstance(arg, int):
             self.score = 0.0
             self.mate_in = arg
@@ -196,8 +55,9 @@ class EvalScore:
     def __repr__(self):
         return f"<EvalScore({self.__str__()})>"
 
-    def __eq__(self, other: "EvalScore"):
-        if self.__class__ != other.__class__:
+    def __eq__(self, other: object) -> bool:
+
+        if not isinstance(other, EvalScore):
             return NotImplemented
         return self.score == other.score and self.mate_in == other.mate_in
 
@@ -210,7 +70,7 @@ class EvalScore:
             (self.mate_in - other.mate_in) // abs(self.mate_in - other.mate_in or 1),
         )
 
-        res = self.comparison_map[tuple(comp)]
+        res = self.comparison_map[comp]
         return res == side if res is not None else False
 
     def __gt__(self, other: "EvalScore"):
@@ -231,10 +91,10 @@ class ChessEngine:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        self._process.stdout.readline()
+        self._process.stdout.readline()   # type: ignore
         self.default_eval_depth = default_eval_depth
-        self.move_probabilities: tuple[int] = (0,)
-        self.options = {}
+        self.move_probabilities: Sequence[int] = (0,)
+        self.options: dict[str, Union[str, int]] = {}
         self["multiPV"] = 3
 
     def __hash__(self):
@@ -250,83 +110,74 @@ class ChessEngine:
         return self.options[key]
 
     @staticmethod
-    def _parse_response(src: str, is_white: bool) -> dict:
-        formatted = (
-            src.removeprefix("info ").replace("cp ", "cp#").replace("mate ", "mate#")
-        )
-        tokens = formatted.split(" ")
-        res = dict(
-            zip(tokens[: tokens.index("pv") : 2], tokens[1 : tokens.index("pv") : 2])
-        )
-        res["pv"] = tokens[tokens.index("pv") + 1 :]
+    def _parse_response(src: str, board: BoardInfo, depth: int) -> Optional[EngineResponse]:
+        tokens = src.removeprefix("info ").replace("cp ", "cp#").replace("mate ", "mate#").split(" ")
+        _res = dict(zip(tokens[: tokens.index("pv") : 2], tokens[1 : tokens.index("pv") : 2]))
+        eval_type, eval_score = _res["score"].split("#")
 
-        for key in res:
-            if isinstance(res[key], str) and res[key].isdigit():
-                res[key] = int(res[key])
-
-        eval_type, eval_score = res["score"].split("#")
-        res["score"] = EvalScore(
-            int(eval_score) / 100 if eval_type == "cp" else int(eval_score), is_white
+        res = EngineResponse(
+            depth=int(_res["depth"]), 
+            multipv=int(_res["multipv"]), 
+            score=EvalScore(
+                int(eval_score) / 100 if eval_type == "cp" else int(eval_score), board.is_white_turn
+            ),
+            moves=[]
         )
-        res["score"].score *= 1 if is_white else -1
-        res["score"].mate_in *= 1 if is_white else -1
+        if res["depth"] != depth:
+            return None
+
+        res["score"].score *= 1 if board.is_white_turn else -1
+        res["score"].mate_in *= 1 if board.is_white_turn else -1
+
+        _moves = tokens[tokens.index("pv") + 1 :]
+        for index in range(len(_moves)):
+            res["moves"].append(decode_engine_move(_moves[index], board))
+            board = res["moves"][index].apply()
 
         return res
 
     def _input(self, cmd: str) -> None:
-        self._process.stdin.write(cmd)
+        self._process.stdin.write(cmd)   # type: ignore
         # print("Process <-", repr(cmd))
 
-    def set_move_probabilities(self, values: tuple[int]) -> None:
+    def set_move_probabilities(self, values: list[int]) -> None:
         self.move_probabilities = values
 
     def get_moves(
         self, board: BoardInfo, depth: int = None, **kwargs
-    ) -> list[dict[str, Union[str, int, float, list[Move]]]]:
-        depth = depth or self.default_eval_depth
+    ) -> list[EngineResponse]:
+        if depth is None:
+            depth = self.default_eval_depth
+        assert depth is not None
         self._input(
             f"position fen {board.get_fen()}\ngo depth {depth} { ' '.join([f'{k} {v}' for k, v in kwargs.items()]) }\n"
         )
-        self._process.stdout.readline()
-        results = []
-        for line in self._process.stdout:
+        self._process.stdout.readline()   # type: ignore
+        results: list[EngineResponse] = []
+        for line in self._process.stdout:   # type: ignore
             # print("Process ->", repr(line))
             if "bestmove" in line:
                 break
             elif "currmove" in line:
                 continue
             elif " depth" in line:
-                parsed = self._parse_response(line[:-1], board.is_white_turn)
-                if (
-                    parsed["multipv"] not in [i["multipv"] for i in results]
-                    and parsed["depth"] == depth
-                ):
+                parsed = self._parse_response(line[:-1], board, depth)
+                if parsed is not None:
                     results.append(parsed)
 
-        filtered = [i for i in results if i["depth"] == depth]
-        if not filtered:
-            filtered = results
-
-        for line in filtered:
-            for index in range(len(line["pv"])):
-                prev_board = (
-                    line["pv"][index - 1].board + line["pv"][index - 1]
-                    if index
-                    else board
-                )
-                line["pv"][index] = decode_engine_move(line["pv"][index], prev_board)
-
-        return filtered
+        return results
 
     def get_move(self, *args, **kwargs) -> Move:
         res = self.get_moves(*args, **kwargs)
-        return res[max(len(res) - 1, random.choice(self.move_probabilities))]["pv"][0]
+        return res[min(len(res) - 1, random.choice(self.move_probabilities))]["moves"][0]
 
     def eval_position_static(self, board: BoardInfo) -> EvalScore:
-        self._process.stdin.write(f"position fen {board.get_fen()}\neval\n")
-        for line in self._process.stdout:
+        self._input(f"position fen {board.get_fen()}\neval\n")
+        for line in self._process.stdout:   #  type: ignore
             if "Final evaluation" in line:
                 return EvalScore(float(line.split()[2]), board.is_white_turn)
+
+        assert False
 
     @functools.lru_cache(maxsize=32)
     def eval_position(self, move: Move, depth: int = None) -> EvalScore:
@@ -335,21 +186,24 @@ class ChessEngine:
 
     def eval_move(
         self, move: Move, depth: int = None, prev_move: Move = None
-    ) -> tuple[MoveEval, Move, EvalScore]:
+    ) -> None:
         n_moves = 0
+        cur_eval = self.eval_position(move, depth)
         for piece in move.board.whites if move.is_white else move.board.blacks:
             n_moves += len(piece.get_moves())
         if n_moves == 1:
-            return (MoveEval.FORCED, move)
+            move.metadata["pos_eval"] = cur_eval
+            move.metadata["move_eval"] = MoveEval.FORCED
+            move.metadata["best_move"] = move
+            move.metadata["best_move_eval"] = cur_eval
 
         if prev_move:
             prev_eval = self.eval_position(prev_move, depth)
         else:
             prev_eval = self.eval_position_static(move.board)
-        cur_eval = self.eval_position(move, depth)
 
         best_line, second_best_line, _ = self.get_moves(move.board, depth)
-        if move == best_line["pv"][0]:
+        if move == best_line["moves"][0]:
             mark = (
                 MoveEval.PRECISE
                 if second_best_line["score"] < prev_eval
@@ -426,4 +280,7 @@ class ChessEngine:
                     else:
                         mark = MoveEval.GREAT
 
-        return mark, best_line["pv"][0], best_line["score"]
+        move.metadata["pos_eval"] = cur_eval
+        move.metadata["move_eval"] = mark
+        move.metadata["best_move"] = best_line["moves"][0]
+        move.metadata["best_move_eval"] = best_line["score"]

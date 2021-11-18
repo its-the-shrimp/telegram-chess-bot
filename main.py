@@ -2,9 +2,29 @@ import io
 import queue
 import os, sys
 import json
-from typing import Iterator, Optional, Callable, Any, Generator, Type, Union
+from typing import (
+    Optional,
+    Callable,
+    Type,
+    Union,
+    cast,
+)
 import telegram as tg
-from telegram import messageautodeletetimerchanged
+from telegram.ext import (
+    Dispatcher,
+    CommandHandler,
+    ChatMemberHandler,
+    Handler,
+    ChosenInlineResultHandler,
+    InlineQueryHandler,
+    filters,
+    ExtBot,
+    MessageHandler,
+    DelayQueue,
+    ContextTypes,
+    Defaults,
+    CallbackQueryHandler,
+)
 import chess as core
 import difflib
 import logging
@@ -12,13 +32,13 @@ import re
 import traceback
 import flask
 import time
-import pickle
-import redis
 
 
 INLINE_OPTION_PATTERN = re.compile(r"\w+:\d")
-flask_callbacks: list[tuple, dict] = []
-tg_handlers: list[tg.ext.Handler] = []
+flask_callbacks: list[tuple[tuple, dict]] = []
+tg_handlers: list[Handler] = []
+tg_keyboard_commands: dict[str, core.KeyboardCommand] = {}
+core.BoardGameContext.menu = core.MenuFormatter.from_dict(core.OPTIONS)
 
 debug_env_path = os.path.join(os.path.dirname(__file__), "debug_env.json")
 IS_DEBUG = os.path.exists(debug_env_path)
@@ -27,333 +47,19 @@ if IS_DEBUG:
         os.environ.update(json.load(r))
 
 
-class RedisInterface(redis.Redis):
-    bot: tg.Bot
-
-    def _fetch_matches(
-        self, decoder: Callable[[bytes], Any], dispatcher: tg.ext.Dispatcher
-    ) -> Generator[tuple[str, Any], None, None]:
-        for key in self.scan_iter(match="match:*"):
-            mid = key.split(b":")[1].decode()
-            yield mid, decoder(self.get(key), dispatcher, mid)
-
-    def _flush_matches(self, matches: dict[str, object]) -> None:
-        for id, matchobj in matches.items():
-            self.set(f"match:{id}", bytes(matchobj))
-
-    def get_pending_message(
-        self, pmid: str
-    ) -> Optional[tuple[Callable[[tg.Update, "BoardGameContext"], None], tuple, dict]]:
-        raw_f = self.get(f"pm:{pmid}:f")
-        if int(self.get(f"pm:{pmid}:is-single").decode()) and raw_f:
-            self.delete(f"pm:{pmid}:f", f"pm:{pmid}:is-single")
-            return pickle.loads(raw_f)
-
-    def get_name(self, user: tg.User) -> str:
-        """
-        If user has enabled anonymous mode, returns "player(ID of the user)",
-        otherwise returns his username, or full name, if no username is available.
-        Arguments:
-            user: `User` - User whose name needs to bee queried.
-        Returns: `str` - Name of the user.
-        """
-        if self.exists(f"{user.id}:isanon"):
-            return f"player{user.id}"
-        else:
-            return user.name
-
-    def create_invite(self, invite_id: str, user: tg.User, options: dict):
-        self.set(
-            f"invite:{invite_id}",
-            json.dumps({"from_user": user.to_dict(), "options": options}).encode(),
-            ex=1800,
-        )
-
-    def get_invite(self, invite_id: str) -> Optional[dict]:
-        raw = self.get(f"invite:{invite_id}")
-        if raw:
-            self.delete(f"invite:{invite_id}")
-            res = json.loads(raw.decode())
-            res["from_user"] = tg.User.de_json(res["from_user"], self.bot)
-            return res
-
-    def set_anon_mode(self, user: tg.User, value: bool) -> None:
-        if value:
-            self.set(f"{user.id}:isanon", b"1")
-        else:
-            self.delete(f"{user.id}:isanon")
-
-    def get_user_ids(self) -> Generator[int, None, None]:
-        for key in self.scan_iter(match="*:lang"):
-            key = key.decode()
-            yield int(key[: key.find(":")])
-
-    def get_langcodes_stats(self) -> dict[str, int]:
-        counter = {}
-        for key in self.keys(pattern="*:lang"):
-            key = self.get(key).decode()
-            if key in counter:
-                counter[key] += 1
-            else:
-                counter[key] = 1
-
-        return counter
-
-    def __getitem__(self, user_id: int) -> Union[dict, bytes]:
-        if isinstance(user_id, int):
-            return {
-                "lang_code": (self.get(f"{user_id}:lang") or b"en").decode(),
-                "is_anon": bool(self.exists(f"{user_id}:isanon")),
-                "total": int(self.get(f"{user_id}:total") or 0),
-                "wins": int(self.get(f"{user_id}:wins") or 0),
-            }
-        else:
-            return super().__getitem__(user_id)
-
-    def __delitem__(self, user_id: int) -> bool:
-        if isinstance(user_id, int):
-            return bool(
-                self.delete(
-                    f"{user_id}:lang",
-                    f"{user_id}:isanon",
-                    f"{user_id}:total",
-                    f"{user_id}:wins",
-                )
-            )
-        else:
-            return bool(super().__delitem__(user_id))
-
-
-class OptionValue:
-    def __init__(self, value: str, condition: Callable[[dict[str, str]], bool] = None):
-        self.value = value
-        self.is_available = condition or (lambda _: True)
-
-    def __repr__(self):
-        return f"<OptionValue({self.value})>"
-
-    def __eq__(self, other):
-        return isinstance(self, other.__class__) and self.value == other.value
-
-
-class MenuOption:
-    @classmethod
-    def from_dict(cls, name: str, obj: dict) -> "MenuOption":
-        return cls(
-            name,
-            [OptionValue(k, condition=v) for k, v in obj["values"].items()],
-            condition=obj.get("condition"),
-        )
-
-    def __init__(
-        self,
-        name: str,
-        values: list[OptionValue],
-        condition: Callable[[dict[str, str]], bool] = None,
-    ):
-        self.name = name
-        self.values = values
-        self.is_available = condition or (lambda _: True)
-
-    def __repr__(self):
-        return f"<MenuOption({self.name}); {len(self.values)} values>"
-
-    def __iter__(self) -> Iterator[OptionValue]:
-        return self.values.__iter__()
-
-    def available_values(self, indexes: dict[str, str]) -> list[str]:
-        if not self.is_available(indexes):
-            return []
-        return [i.value for i in self.values if i.is_available(indexes)]
-
-
-class MenuFormatter:
-    @classmethod
-    def from_dict(cls, obj: dict) -> "MenuFormatter":
-        return cls([MenuOption.from_dict(*args) for args in obj.items()])
-
-    def __init__(self, options: list[MenuOption]):
-        self.options: list[MenuOption] = options
-        self.defaults: dict[str, int] = {}
-
-        for option in self:
-            if not self.defaults:
-                self.defaults[option.name] = option.values[0].value
-            else:
-                self.defaults[option.name] = self.get_default_value(
-                    option.name, self.defaults
-                )
-
-    def __iter__(self) -> Iterator[MenuOption]:
-        return self.options.__iter__()
-
-    def __getitem__(self, key: str) -> MenuOption:
-        for option in self:
-            if option.name == key:
-                return option
-
-        raise KeyError(key)
-
-    def get_value(self, key: str, index: int) -> str:
-        lookup_list = [value.value for value in self[key]]
-        return lookup_list[index]
-
-    def get_index(self, key: str, value: str) -> int:
-        lookup_list = [value.value for value in self[key]]
-        return lookup_list.index(value)
-
-    def get_default_value(self, name: str, indexes: dict[str, str]) -> str:
-        try:
-            return self[name].available_values(indexes)[0]
-        except IndexError:
-            return None
-
-    def decode(self, keyboard: tg.InlineKeyboardMarkup) -> dict[str, str]:
-        res = {}
-        for column in keyboard.inline_keyboard[:-1]:
-            column_data = core.parse_callback_data(column[1].callback_data)["args"]
-            res[column_data[0]] = self.get_value(column_data[0], column_data[1])
-
-        return res
-
-    def encode(
-        self, user: tg.User, indexes: dict[str, str] = None
-    ) -> tg.InlineKeyboardMarkup:
-        res = []
-        indexes = indexes or self.defaults
-
-        for option in self:
-            if option.is_available(indexes):
-                if option.name in indexes:
-                    chosen = indexes[option.name]
-                else:
-                    chosen = self.get_default_value(option.name, indexes)
-                    indexes[option.name] = chosen
-                res.append(
-                    [
-                        tg.InlineKeyboardButton(
-                            text="◀️",
-                            callback_data=core.format_callback_data(
-                                "PREV",
-                                args=[option.name],
-                                expected_uid=user.id,
-                                handler_id="MAIN",
-                            ),
-                        ),
-                        tg.InlineKeyboardButton(
-                            text=core.langtable[user.language_code][chosen],
-                            callback_data=core.format_callback_data(
-                                "DESC",
-                                args=[option.name, self.get_index(option.name, chosen)],
-                                handler_id="MAIN",
-                                expected_uid=user.id,
-                            ),
-                        ),
-                        tg.InlineKeyboardButton(
-                            text="▶️",
-                            callback_data=core.format_callback_data(
-                                "NEXT",
-                                args=[option.name],
-                                handler_id="MAIN",
-                                expected_uid=user.id,
-                            ),
-                        ),
-                    ]
-                )
-            else:
-                if option.name in indexes:
-                    del indexes[option.name]
-
-        inline_query = self.tg_encode(indexes) if indexes["mode"] == "invite" else None
-
-        res.append(
-            [
-                tg.InlineKeyboardButton(
-                    text=core.langtable[user.language_code]["main:cancel-button"],
-                    callback_data=core.format_callback_data(
-                        "CANCEL", handler_id="MAIN", expected_uid=user.id
-                    ),
-                ),
-                tg.InlineKeyboardButton(
-                    text=core.langtable[user.language_code]["main:play-button"],
-                    switch_inline_query=inline_query,
-                    callback_data=None
-                    if inline_query
-                    else core.format_callback_data(
-                        "PLAY", handler_id="MAIN", expected_uid=user.id
-                    ),
-                ),
-            ]
-        )
-
-        return tg.InlineKeyboardMarkup(res)
-
-    def prettify(self, indexes: dict[str, str], lang_code: str) -> str:
-        locale = core.langtable[lang_code]
-
-        return "\n".join(
-            [
-                locale["main:options-title"],
-                ", ".join([locale[i] for i in indexes.values()]),
-            ]
-        )
-
-    def tg_encode(self, indexes: dict[str, str]) -> str:
-        return " ".join([":".join((k, v)) for k, v in indexes.items() if k != "mode"])
-
-    def tg_decode(self, src: str) -> dict[str, str]:
-        indexes = dict(token.split(":") for token in src.split(" ") if ":" in token)
-        for option in self:
-            is_available = option.is_available(indexes)
-            if option.name not in indexes and is_available:
-                indexes[option.name] = self.get_default_value(option.name, indexes)
-            elif option.name in indexes and not is_available:
-                del indexes[option.name]
-
-        return indexes
-
-
-class BoardGameContext(tg.ext.CallbackContext):
-    menu: MenuFormatter = MenuFormatter.from_dict(core.OPTIONS)
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.langtable: dict[str, str] = None
-        RedisInterface.bot = self.dispatcher.bot
-
-    @classmethod
-    def from_update(
-        cls, update: tg.Update, dispatcher: tg.ext.Dispatcher
-    ) -> "BoardGameContext":
-        self = super().from_update(update, dispatcher)
-        if update is not None:
-            if update.effective_user is not None:
-                self.langtable = core.langtable[update.effective_user.language_code]
-
-            self.db.set(
-                f"{update.effective_user.id}:lang",
-                update.effective_user.language_code.encode(),
-            )
-
-        return self
-
-    @property
-    def db(self) -> RedisInterface:
-        return self.dispatcher.bot_data["conn"]
-
-
 class TelegramBotApp(flask.Flask):
-    dispatcher: tg.ext.Dispatcher
+    dispatcher: Dispatcher
 
 
 def get_opponent(queue: list[dict], options: dict) -> Optional[dict]:
     for queuepoint in reversed(queue):
         if options == queuepoint["options"]:
             return queuepoint
+    return None
 
 
-def _tg_adapter(f: core.TelegramCallback) -> core.TelegramCallback:
-    def decorated(update: tg.Update, context: BoardGameContext):
+def _tg_adapter(f: core.TextCommand) -> core.TextCommand:
+    def decorated(update: tg.Update, context: core.BoardGameContext):
         try:
             f(update, context)
         except Exception as exc:
@@ -368,7 +74,7 @@ def _tg_adapter(f: core.TelegramCallback) -> core.TelegramCallback:
     return decorated
 
 
-def flask_callback(*args, **kwargs):
+def flask_callback(*args, **kwargs) -> Callable[[Callable], Callable]:
     def decorator(f: Callable) -> Callable:
         flask_callbacks.append((args, kwargs | {"view_func": f}))
         return f
@@ -376,9 +82,11 @@ def flask_callback(*args, **kwargs):
     return decorator
 
 
-def tg_callback(handler_type: Type[tg.ext.Handler], *args, **kwargs):
-    def decorator(f: core.TelegramCallback) -> core.TelegramCallback:
-        def decorated(update: tg.Update, context: BoardGameContext):
+def tg_callback(
+    handler_type: Type[Handler], *args, **kwargs
+) -> Callable[[core.TextCommand], core.TextCommand]:
+    def decorator(f: core.TextCommand) -> core.TextCommand:
+        def decorated(update: tg.Update, context: core.BoardGameContext):
 
             if getattr(update.effective_chat, "type", tg.Chat.PRIVATE) in (
                 tg.Chat.PRIVATE,
@@ -392,15 +100,20 @@ def tg_callback(handler_type: Type[tg.ext.Handler], *args, **kwargs):
                     (_tg_adapter(f), (update, context), {})
                 )
 
-        tg_handlers.append(handler_type(*args, decorated, **kwargs))
-        return decorated
+        tg_handlers.append(handler_type(*args, decorated, **kwargs))  # type: ignore
+        return f
 
     return decorator
 
 
-def error_handler(update: tg.Update, context: BoardGameContext):
+def keyboard_command(f: core.KeyboardCommand) -> core.KeyboardCommand:
+    tg_keyboard_commands[f.__name__.upper()] = f
+    return f
+
+
+def error_handler(update: object, context: core.BoardGameContext):
     try:
-        raise context.error
+        raise cast(BaseException, context.error)
     except Exception as err:
         if type(err) == tg.error.Conflict:
             context.bot.send_message(
@@ -413,11 +126,11 @@ def error_handler(update: tg.Update, context: BoardGameContext):
                     traceback.format_exc(limit=10),
                     "",
                     json.dumps(update.to_dict(), indent=2)
-                    if update is not None
+                    if isinstance(update, tg.Update)
                     else "No update provided.",
                 ]
             )
-            tb = tb[max(0, len(tb) - tg.constants.MAX_MESSAGE_LENGTH) :]
+            tb = tb[: min(len(tb), tg.constants.MAX_MESSAGE_LENGTH)]
 
             context.bot.send_message(
                 chat_id=os.environ["CREATOR_ID"],
@@ -426,23 +139,30 @@ def error_handler(update: tg.Update, context: BoardGameContext):
             )
 
 
-@tg_callback(tg.ext.CommandHandler, "start")
-def start(update: tg.Update, context: BoardGameContext):
+@tg_callback(ChatMemberHandler)
+@tg_callback(CommandHandler, "start")
+def start(update: tg.Update, context: core.BoardGameContext):
     if context.args:
         if context.args[0].startswith("pmid"):
             pmsg_id = context.args[0].removeprefix("pmid")
-            pm, pm_args, pm_kwargs = context.db.get_pending_message(pmsg_id)
+            pm = context.db.get_pending_message(pmsg_id)
             if pm is not None:
-                pm(update, context, *pm_args, **pm_kwargs)
+                pm[0](update, context, *pm[1])
             elif hasattr(core, "on_pm_expired"):
-                core.on_pm_expired(update, context)
+                core.on_pm_expired(update, context)  # type: ignore
     else:
-        update.effective_chat.send_message(text=context.langtable["main:start-msg"])
+        try:
+            cast(tg.Chat, update.effective_chat).send_message(
+                text=context.langtable["main:start-msg"]
+            )
+        except tg.error.Unauthorized:
+            pass
 
 
-@tg_callback(tg.ext.CommandHandler, "settings")
-def settings(update: tg.Update, context: BoardGameContext):
-    is_anon = context.db.get_anon_mode(update.effective_user)
+@tg_callback(CommandHandler, "settings")
+def settings(update: tg.Update, context: core.BoardGameContext):
+    assert update.effective_user and update.effective_message
+    is_anon = context.db.get_user_data(update.effective_user.id)["is_anon"]
     update.effective_message.reply_text(
         context.langtable["main:settings-msg"],
         parse_mode=tg.ParseMode.HTML,
@@ -453,10 +173,12 @@ def settings(update: tg.Update, context: BoardGameContext):
                         text=context.langtable["main:anonmode-button"].format(
                             state="🟢" if is_anon else "🔴"
                         ),
-                        callback_data=core.format_callback_data(
-                            "ANON_MODE_OFF" if is_anon else "ANON_MODE_ON",
-                            handler_id="MAIN",
-                            expected_uid=update.effective_user.id,
+                        callback_data=str(
+                            core.CallbackData(
+                                "ANON_MODE_OFF" if is_anon else "ANON_MODE_ON",
+                                handler_id="MAIN",
+                                expected_uid=update.effective_user.id,
+                            )
                         ),
                     )
                 ]
@@ -465,37 +187,58 @@ def settings(update: tg.Update, context: BoardGameContext):
     )
 
 
-@tg_callback(tg.ext.CommandHandler, "stats")
-def stats(update: tg.Update, context: BoardGameContext):
-    try:
-        user_data = context.db[update.effective_user.id]
-        update.effective_message.reply_text(
-            context.langtable["main:stats"].format(
-                name=context.db.get_name(update.effective_user),
-                total=user_data["total"],
-                wins=user_data["wins"],
-                winrate=user_data["wins"] / user_data["total"] if user_data["total"] else 0.0,
-            ),
-            parse_mode=tg.ParseMode.HTML,
-        )
-    except BaseException as exc:
-        context.dispatcher.dispatch_error(update, exc)
+@tg_callback(CommandHandler, "stats")
+def stats(update: tg.Update, context: core.BoardGameContext):
+    assert update.effective_user and update.effective_message
+    user_data = context.db.get_user_data(update.effective_user.id)
+    update.effective_message.reply_text(
+        context.langtable["main:stats"].format(
+            name=context.db.get_name(update.effective_user),
+            total=user_data["total"],
+            wins=user_data["wins"],
+            winrate=user_data["wins"] * 100 / user_data["total"]
+            if user_data["total"]
+            else 0.0,
+        ),
+        parse_mode=tg.ParseMode.HTML,
+    )
 
 
-@tg_callback(tg.ext.CommandHandler, core.__name__)
-def boardgame_menu(update: tg.Update, context: BoardGameContext) -> None:
+@tg_callback(CommandHandler, "clear")
+def clear_match_cache(update: tg.Update, context: core.BoardGameContext):
+    assert update.effective_message and update.effective_user
+    if update.effective_user.id == int(os.environ["CREATOR_ID"]):
+        n = 0
+        if context.args:
+            for match_id in context.args:
+                n += context.db.delete(f"match:{match_id}")
+                del context.bot_data["matches"][match_id]
+        else:
+            context.bot_data["matches"].clear()
+            for match_id in context.db.scan_iter(match="match:*"):
+                n += context.db.delete(match_id)
+
+        update.effective_message.reply_text(f"{n} games deleted")
+
+
+@tg_callback(CommandHandler, core.__name__)
+def boardgame_menu(update: tg.Update, context: core.BoardGameContext) -> None:
+    assert update.effective_chat and update.effective_user
     update.effective_chat.send_message(
-        context.langtable["main:game-setup"],
+        context.menu.format_notes(context),
         reply_markup=context.menu.encode(update.effective_user),
     )
 
 
-@tg_callback(tg.ext.InlineQueryHandler)
-def send_invite_inline(update: tg.Update, context: BoardGameContext) -> None:
+@tg_callback(InlineQueryHandler)
+def send_invite_inline(update: tg.Update, context: core.BoardGameContext) -> None:
+    assert update.inline_query and update.effective_user
     logging.info(f"Handling inline query: {update.inline_query.query}")
 
     options = context.menu.tg_decode(update.inline_query.query)
-    challenge_desc = context.menu.prettify(options, update.effective_user.language_code)
+    challenge_desc = context.menu.prettify(
+        options, cast(str, update.effective_user.language_code)
+    )
 
     match_id = core.create_match_id()
 
@@ -515,8 +258,10 @@ def send_invite_inline(update: tg.Update, context: BoardGameContext) -> None:
                         [
                             tg.InlineKeyboardButton(
                                 text=context.langtable["main:accept-button"],
-                                callback_data=core.format_callback_data(
-                                    "ACCEPT", [match_id], handler_id="MAIN"
+                                callback_data=str(
+                                    core.CallbackData(
+                                        "ACCEPT", args=[match_id], handler_id="MAIN"
+                                    )
                                 ),
                             )
                         ]
@@ -527,8 +272,9 @@ def send_invite_inline(update: tg.Update, context: BoardGameContext) -> None:
     )
 
 
-@tg_callback(tg.ext.ChosenInlineResultHandler)
-def create_invite(update: tg.Update, context: BoardGameContext):
+@tg_callback(ChosenInlineResultHandler)
+def create_invite(update: tg.Update, context: core.BoardGameContext):
+    assert update.chosen_inline_result and update.effective_user
     options = context.menu.tg_decode(update.chosen_inline_result.query)
 
     context.db.create_invite(
@@ -536,8 +282,9 @@ def create_invite(update: tg.Update, context: BoardGameContext):
     )
 
 
-@tg_callback(tg.ext.MessageHandler, tg.ext.filters.Filters.regex("^/"))
-def unknown(update: tg.Update, context: BoardGameContext):
+@tg_callback(MessageHandler, filters.Filters.regex("^/"))
+def unknown(update: tg.Update, context: core.BoardGameContext):
+    assert update.effective_message and update.effective_message.text
     if not update.effective_message.text.isascii():
         return
 
@@ -552,368 +299,429 @@ def unknown(update: tg.Update, context: BoardGameContext):
     )
 
 
-@tg_callback(tg.ext.CallbackQueryHandler)
-def button_callback(update: tg.Update, context: BoardGameContext) -> Optional[tuple]:
-    args = core.parse_callback_data(update.callback_query.data)
-    logging.debug(f"Handling user input: {args}")
-    if (
-        args["expected_uid"]
-        and args["expected_uid"] != update.callback_query.from_user.id
-    ):
-        if args["handler_id"] == "MAIN":
-            update.callback_query.answer(context.langtable["main:error-popup-msg"])
+@keyboard_command
+def anon_mode_off(update: tg.Update, context: core.BoardGameContext, args: list[str]):
+    assert update.effective_user and update.effective_message
+    context.db.set_anon_mode(update.effective_user, False)
+    cast(tg.CallbackQuery, update.callback_query).answer(
+        context.langtable["main:anonmode-off"], show_alert=True
+    )
+    update.effective_message.edit_reply_markup(
+        tg.InlineKeyboardMarkup(
+            [
+                [
+                    tg.InlineKeyboardButton(
+                        text=context.langtable["main:anonmode-button"].format(
+                            state="🔴"
+                        ),
+                        callback_data=str(
+                            core.CallbackData(
+                                "ANON_MODE_ON",
+                                expected_uid=update.effective_user.id,
+                                handler_id="MAIN",
+                            )
+                        ),
+                    )
+                ]
+            ]
+        )
+    )
+
+
+@keyboard_command
+def anon_mode_on(update: tg.Update, context: core.BoardGameContext, args: list[str]):
+    assert update.effective_message and update.effective_user
+    context.db.set_anon_mode(update.effective_user, True)
+    cast(tg.CallbackQuery, update.callback_query).answer(
+        context.langtable["main:anonmode-on"], show_alert=True
+    )
+    update.effective_message.edit_reply_markup(
+        tg.InlineKeyboardMarkup(
+            [
+                [
+                    tg.InlineKeyboardButton(
+                        text=context.langtable["main:anonmode-button"].format(
+                            state="🟢"
+                        ),
+                        callback_data=str(
+                            core.CallbackData(
+                                "ANON_MODE_OFF",
+                                handler_id="MAIN",
+                                expected_uid=update.effective_user.id,
+                            )
+                        ),
+                    )
+                ]
+            ]
+        )
+    )
+
+
+@keyboard_command
+def prev(update: tg.Update, context: core.BoardGameContext, args: list[str]):
+    assert update.effective_message and update.effective_user and update.callback_query
+    options = cast(dict[str, Optional[str]], context.menu.decode(
+        cast(tg.InlineKeyboardMarkup, update.effective_message.reply_markup)
+    ))
+    key = args[0]
+
+    values = context.menu[key].available_values(options)
+    values_iter = reversed(values)
+    for value in values_iter:
+        if value == options[key]:
+            try:
+                options[key] = __builtins__["next"](values_iter)    # type: ignore
+            except StopIteration:
+                options[key] = values[-1]
+            break
+
+    if len(values) > 1:
+        update.effective_message.edit_text(
+            text=context.menu.format_notes(context, options=options),
+            reply_markup=context.menu.encode(update.effective_user, indexes=options),
+        )
+    update.callback_query.answer(
+        f"{context.langtable['main:chosen-popup']} {context.langtable[key]} - {context.langtable[options[key]]}"
+    )
+
+
+@keyboard_command
+def next(update: tg.Update, context: core.BoardGameContext, args: list[str]):
+    assert update.effective_message and update.effective_user and update.callback_query
+    options = cast(dict[str, Optional[str]], context.menu.decode(
+        cast(tg.InlineKeyboardMarkup, update.effective_message.reply_markup)
+    ))
+    key = args[0]
+
+    values = context.menu[key].available_values(options)
+    values_iter = iter(values)
+    for value in values_iter:
+        if value == options[key]:
+            try:
+                options[key] = __builtins__["next"](values_iter)   # type: ignore
+            except StopIteration:
+                options[key] = values[0]
+            break
+
+    if len(values) > 1:
+        update.effective_message.edit_text(
+            text=context.menu.format_notes(context, options=options),
+            reply_markup=context.menu.encode(update.effective_user, indexes=options),
+        )
+    update.callback_query.answer(
+        f"{context.langtable['main:chosen-popup']} {context.langtable[key]} - {context.langtable[options[key]]}"
+    )
+
+
+@keyboard_command
+def desc(update: tg.Update, context: core.BoardGameContext, args: list[str]):
+    key = f"{context.menu.get_value(args[0], int(args[1]))}:desc"
+    cast(tg.CallbackQuery, update.callback_query).answer(
+        context.langtable[key] if key in context.langtable else None,
+        show_alert=True,
+    )
+
+
+@keyboard_command
+def restoremenu(update: tg.Update, context: core.BoardGameContext, args: list[str]):
+    cast(tg.Message, update.effective_message).delete()
+    boardgame_menu(update, context)
+
+
+@keyboard_command
+def play(update: tg.Update, context: core.BoardGameContext, args: list[str]):
+    assert (
+        isinstance(context.user_data, dict)
+        and update.effective_message
+        and update.callback_query
+        and update.effective_user
+        and update.effective_chat
+    )
+    if args:
+        options = context.user_data["opponent"]["options"]
+    elif context.menu.is_valid(update.effective_message.reply_markup):
+        options = context.menu.decode(
+            cast(tg.InlineKeyboardMarkup, update.effective_message.reply_markup)
+        )
+    else:
+        restoremenu(update, context, args)
+
+    for match in context.bot_data["matches"].values():
+        if update.effective_user in match:
+            if isinstance(match, core.PMMatch):
+                msg = cast(
+                    Union[core.InlineMessage, tg.Message],
+                    match.msg1
+                    if update.effective_user == match.player1
+                    else match.msg2,
+                )
+            elif isinstance(match, core.GroupMatch):
+                msg = match.msg
+
+            if (
+                not isinstance(msg, core.InlineMessage)
+                and msg.chat == update.effective_chat
+            ):
+                update.callback_query.answer(
+                    context.langtable["main:pending-match-in-same-chat"],
+                    show_alert=True,
+                )
+            else:
+                update.callback_query.answer(
+                    context.langtable["main:pending-match-in-other-chat"],
+                    show_alert=True,
+                )
+
+            return
+
+    if options["mode"] == "vsbot":
+        update.effective_message.edit_text(context.langtable["main:match-found"])
+        new_msg = update.effective_chat.send_photo(
+            core.INVITE_IMAGE, caption=context.langtable["main:starting-match"]
+        )
+        new: core.BaseMatch = core.AIMatch(
+            update.effective_user,
+            context.bot.get_me(),
+            new_msg,
+            None,
+            options=options,
+            dispatcher=context.dispatcher,
+        )
+        context.bot_data["matches"][new.id] = new
+        try:
+            new.init_turn()
+        except Exception as exc:
+            del context.bot_data["matches"][new.id]
+            if hasattr(core, "ERROR_IMAGE"):
+                new_msg.edit_media(
+                    media=tg.InputMediaPhoto(
+                        core.ERROR_IMAGE,   # type: ignore
+                        caption=context.langtable["main:init-error"],
+                    )
+                )
+            else:
+                new_msg.edit_caption(caption=context.langtable["main:init-error"])
+            context.dispatcher.dispatch_error(update, exc)
+
+    elif options["mode"] == "online":
+        if args:
+            opponent = context.user_data["opponent"]
+            del context.user_data["opponent"]
         else:
-            update.callback_query.answer(
-                text=context.langtable["main:unexpected-uid"],
-                show_alert=True,
-            )
-        return
+            opponent = get_opponent(context.bot_data["queue"], options)
+        logging.info(f"Opponent found: {opponent}")
 
-    if args["handler_id"] == "MAIN":
-        if args["command"] == "NA":
-            update.callback_query.answer(text=context.langtable["main:error-popup-msg"])
-        elif args["command"] == "ANON_MODE_OFF":
-            context.db.set_anon_mode(update.effective_user, False)
-            update.callback_query.answer(
-                context.langtable["main:anonmode-off"], show_alert=True
-            )
-            update.effective_message.edit_reply_markup(
-                tg.InlineKeyboardMarkup(
-                    [
-                        [
-                            tg.InlineKeyboardButton(
-                                text=context.langtable["main:anonmode-button"].format(state="🔴"),
-                                callback_data=core.format_callback_data(
-                                    "ANON_MODE_ON",
-                                    expected_uid=update.effective_user.id,
-                                    handler_id="MAIN",
-                                ),
-                            )
-                        ]
-                    ]
-                )
-            )
-        elif args["command"] == "ANON_MODE_ON":
-            context.db.set_anon_mode(update.effective_user, True)
-            update.callback_query.answer(
-                context.langtable["main:anonmode-on"], show_alert=True
-            )
-            update.effective_message.edit_reply_markup(
-                tg.InlineKeyboardMarkup(
-                    [
-                        [
-                            tg.InlineKeyboardButton(
-                                text=context.langtable["main:anonmode-button"].format(state="🟢"),
-                                callback_data=core.format_callback_data(
-                                    "ANON_MODE_OFF",
-                                    handler_id="MAIN",
-                                    expected_uid=update.effective_user.id,
-                                ),
-                            )
-                        ]
-                    ]
-                )
-            )
-
-        elif args["command"] == "PREV":
-            options = context.menu.decode(update.effective_message.reply_markup)
-            key = args["args"][0]
-
-            values = context.menu[key].available_values(options)
-            values_iter = reversed(values)
-            for value in values_iter:
-                if value == options[key]:
-                    try:
-                        options[key] = next(values_iter)
-                    except StopIteration:
-                        options[key] = values[-1]
-                    break
-
-            if len(values) > 1:
-                notes = []
-                if options["mode"] == "online":
-                    notes.append(context.langtable["main:queue-len"].format(n=len(context.bot_data["queue"])))
-                for value in options.values():
-                    notes += [context.langtable[f"{value}:note"]] if f"{value}:note" in context.langtable else []
-                notes.extend(("", context.langtable["main:game-setup"]))
-
+        if opponent:
+            if opponent["user"] == update.effective_user and not args:
+                context.user_data["opponent"] = opponent
                 update.effective_message.edit_text(
-                    text="\n".join(notes),
-                    reply_markup=context.menu.encode(update.effective_user, indexes=options)
+                    text=context.langtable["main:same-player-warning"],
+                    reply_markup=tg.InlineKeyboardMarkup(
+                        [
+                            [
+                                tg.InlineKeyboardButton(
+                                    text=context.langtable["main:continue-button"],
+                                    callback_data=str(core.CallbackData(
+                                        "PLAY",
+                                        args=["1"],
+                                        handler_id="MAIN",
+                                        expected_uid=update.effective_user.id,
+                                    )),
+                                ),
+                                tg.InlineKeyboardButton(
+                                    text=context.langtable["main:cancel-button"],
+                                    callback_data=str(core.CallbackData(
+                                        "RESTOREMENU",
+                                        handler_id="MAIN",
+                                        expected_uid=update.effective_user.id,
+                                    )),
+                                ),
+                            ]
+                        ]
+                    ),
                 )
-            update.callback_query.answer(
-                f"{context.langtable['main:chosen-popup']} {context.langtable[key]} - {context.langtable[options[key]]}"
-            )
-
-        elif args["command"] == "NEXT":
-            options = context.menu.decode(update.effective_message.reply_markup)
-            key = args["args"][0]
-
-            values = context.menu[key].available_values(options)
-            values_iter = iter(values)
-            for value in values_iter:
-                if value == options[key]:
-                    try:
-                        options[key] = next(values_iter)
-                    except StopIteration:
-                        options[key] = values[0]
-                    break
-
-            if len(values) > 1:
-                notes = []
-                if options["mode"] == "online":
-                    notes.append(context.langtable["main:queue-len"].format(n=len(context.bot_data["queue"])))
-                for value in options.values():
-                    notes += [context.langtable[f"{value}:note"]] if f"{value}:note" in context.langtable else []
-                notes.extend(("", context.langtable["main:game-setup"]))
-
-                update.effective_message.edit_text(
-                    text="\n".join(notes),
-                    reply_markup=context.menu.encode(update.effective_user, indexes=options)
-                )
-            update.callback_query.answer(
-                f"{context.langtable['main:chosen-popup']} {context.langtable[key]} - {context.langtable[options[key]]}"
-            )
-
-        elif args["command"] == "DESC":
-            key = f"{context.menu.get_value(*args['args'])}:desc"
-            print(key)
-            update.callback_query.answer(
-                context.langtable[key] if key in context.langtable else None,
-                show_alert=True
-            )
-
-        elif args["command"] == "PLAY":
-            options = context.menu.decode(update.effective_message.reply_markup)
-
-            for match in context.bot_data["matches"].values():
-                if update.effective_user in match:
-                    if isinstance(match, core.PMMatch):
-                        msg = (
-                            match.msg1
-                            if update.effective_user == match.player1
-                            else match.msg2
-                        )
-                    elif isinstance(match, core.GroupMatch):
-                        msg = match.msg
-
-                    if (
-                        not isinstance(msg, core.InlineMessage)
-                        and msg.chat == update.effective_chat
-                    ):
-                        update.callback_query.answer(
-                            context.langtable["main:pending-match-in-same-chat"],
-                            show_alert=True,
-                        )
-                    else:
-                        update.callback_query.answer(
-                            context.langtable["main:pending-match-in-other-chat"],
-                            show_alert=True,
-                        )
-
-                    return
-
-            if options["mode"] == "vsbot":
+            else:
+                context.bot_data["queue"].remove(opponent)
                 update.effective_message.edit_text(
                     context.langtable["main:match-found"]
                 )
+                opponent["msg"].edit_text(context.langtable["main:match-found"])
                 new_msg = update.effective_chat.send_photo(
-                    core.INVITE_IMAGE, caption=context.langtable["main:starting-match"]
+                    core.INVITE_IMAGE,
+                    caption=context.langtable["main:starting-match"],
                 )
-                new = core.AIMatch(
-                    player1=update.effective_user,
-                    player2=context.bot.get_me(),
-                    chat1=update.effective_chat.id,
-                    msg1=new_msg,
-                    options=options,
-                    dispatcher=context.dispatcher,
-                )
-                context.bot_data["matches"][new.id] = new
-                try:
-                    new.init_turn()
-                except BaseException as exc:
-                    del context.bot_data["matches"][new.id]
-                    if hasattr(core, "ERROR_IMAGE"):
-                        new_msg.edit_media(
-                            media=tg.InputMediaPhoto(
-                                core.ERROR_IMAGE,
-                                caption=context.langtable["main:init-error"],
-                            )
-                        )
-                    else:
-                        new_msg.edit_caption(
-                            caption=context.langtable["main:init-error"]
-                        )
-                    context.dispatcher.dispatch_error(update, exc)
-
-            elif options["mode"] == "online":
-                opponent = get_opponent(context.bot_data["queue"], options)
-                logging.info(f"Opponent found: {opponent}")
-                if opponent:
-                    context.bot_data["queue"].remove(opponent)
-                    update.effective_message.edit_text(
-                        context.langtable["main:match-found"]
-                    )
-                    opponent["msg"].edit_text(context.langtable["main:match-found"])
-                    new_msg = update.effective_chat.send_photo(
-                        core.INVITE_IMAGE,
-                        caption=context.langtable["main:starting-match"],
-                    )
-                    if opponent["chat_id"] == update.effective_chat.id:
-                        new = core.GroupMatch(
-                            player1=opponent["user"],
-                            player2=update.effective_user,
-                            chat=opponent["chat_id"],
-                            msg=new_msg,
-                            options=options,
-                            dispatcher=context.dispatcher,
-                        )
-                        context.bot_data["matches"][new.id] = new
-                        try:
-                            new.init_turn()
-                        except BaseException as exc:
-                            del context.bot_data["matches"][new.id]
-                            if hasattr(core, "ERROR_IMAGE"):
-                                new_msg.edit_media(
-                                    media=tg.InputMediaPhoto(
-                                        core.ERROR_IMAGE,
-                                        caption=context.langtable["main:init-error"],
-                                    )
-                                )
-                            else:
-                                new_msg.edit_caption(
-                                    caption=context.langtable["main:init-error"]
-                                )
-                            context.dispatcher.dispatch_error(update, exc)
-
-                    else:
-                        opponent_msg = context.bot.send_photo(
-                            opponent["chat_id"],
-                            core.INVITE_IMAGE,
-                            caption=context.langtable["main:starting-match"],
-                        )
-                        new = core.PMMatch(
-                            player1=opponent["user"],
-                            player2=update.effective_user,
-                            chat1=opponent["chat_id"],
-                            chat2=update.effective_chat.id,
-                            msg1=new_msg,
-                            msg2=opponent_msg,
-                            options=options,
-                            dispatcher=context.dispatcher,
-                        )
-                        context.bot_data["matches"][new.id] = new
-                        try:
-                            new.init_turn()
-                        except BaseException as exc:
-                            del context.bot_data["matches"][new.id]
-                            if hasattr(core, "ERROR_IMAGE"):
-                                media = tg.InputMediaPhoto(
-                                    core.ERROR_IMAGE,
-                                    context.langtable["main:init-error"],
-                                )
-                                new_msg.edit_media(media=media)
-                                opponent_msg.edit_media(media=media)
-                            else:
-                                new_msg.edit_caption(
-                                    caption=context.langtable["main:init-error"]
-                                )
-                                opponent_msg.edit_caption(
-                                    caption=context.langtable["main:init-error"]
-                                )
-
-                else:
-                    context.bot_data["queue"].append(
-                        {
-                            "user": update.effective_user,
-                            "msg": update.effective_message,
-                            "chat_id": update.effective_chat.id,
-                            "options": options,
-                        }
-                    )
-                    update.effective_message.edit_text(
-                        "\n".join(
-                            [
-                                context.langtable["main:awaiting-opponent"],
-                                "",
-                                context.menu.prettify(
-                                    options, update.effective_user.language_code
-                                ),
-                            ]
-                        ),
-                        reply_markup=tg.InlineKeyboardMarkup(
-                            [
-                                [
-                                    tg.InlineKeyboardButton(
-                                        text=context.langtable["main:cancel-button"],
-                                        callback_data=core.format_callback_data(
-                                            "CANCEL",
-                                            handler_id="MAIN",
-                                            expected_uid=update.effective_user.id,
-                                        ),
-                                    )
-                                ]
-                            ]
-                        ),
-                    )
-            elif options["mode"] == "invite":
-                update.effective_message.edit_text(
-                    context.langtable["main:invite-sent"]
-                )
-
-        elif args["command"] == "CANCEL":
-            for index, queued in enumerate(context.bot_data["queue"]):
-                if queued["user"] == update.effective_user:
-                    del context.bot_data["queue"][index]
-                    update.effective_message.edit_text(
-                        context.langtable["main:search-cancelled"]
-                    )
-                    return
-
-            update.callback_query.answer(context.langtable["main:error-popup-msg"])
-            update.effective_message.edit_reply_markup()
-
-        elif args["command"] == "ACCEPT":
-            challenge = context.db.get_invite(args["args"][0])
-            logging.info(f"invite {args['args'][0]}: {challenge}")
-            if challenge:
-                try:
+                if opponent["chat_id"] == update.effective_chat.id:
                     new = core.GroupMatch(
-                        player1=challenge["from_user"],
-                        player2=update.effective_user,
-                        msg=core.InlineMessage(
-                            update.callback_query.inline_message_id, context.bot
-                        ),
-                        options=challenge["options"],
+                        opponent["user"],
+                        update.effective_user,
+                        new_msg,
+                        options=options,
                         dispatcher=context.dispatcher,
                     )
                     context.bot_data["matches"][new.id] = new
-                    new.init_turn()
-                except BaseException as exc:
-                    context.dispatcher.dispatch_error(update, exc)
-                    context.bot.edit_message_caption(
-                        inline_message_id=update.callback_query.inline_message_id,
-                        caption=context.langtable["main:init-error"],
+                    try:
+                        new.init_turn()
+                    except Exception as exc:
+                        del context.bot_data["matches"][new.id]
+                        if hasattr(core, "ERROR_IMAGE"):
+                            new_msg.edit_media(
+                                media=tg.InputMediaPhoto(
+                                    core.ERROR_IMAGE,   # type: ignore
+                                    caption=context.langtable["main:init-error"],
+                                )
+                            )
+                        else:
+                            new_msg.edit_caption(
+                                caption=context.langtable["main:init-error"]
+                            )
+                        context.dispatcher.dispatch_error(update, exc)
+
+                else:
+                    opponent_msg = context.bot.send_photo(
+                        opponent["chat_id"],
+                        core.INVITE_IMAGE,
+                        caption=context.langtable["main:starting-match"],
                     )
-            else:
-                context.bot.edit_message_text(
-                    inline_message_id=update.callback_query.inline_message_id,
-                    text=context.langtable["main:invite-not-found"],
-                )
+                    new = core.PMMatch(
+                        update.effective_user,
+                        opponent["user"],
+                        new_msg,
+                        opponent_msg,
+                        options=options,
+                        dispatcher=context.dispatcher,
+                    )
+                    context.bot_data["matches"][new.id] = new
+                    try:
+                        new.init_turn()
+                    except Exception as exc:
+                        del context.bot_data["matches"][new.id]
+                        if hasattr(core, "ERROR_IMAGE"):
+                            media = tg.InputMediaPhoto(
+                                core.ERROR_IMAGE,    # type: ignore
+                                context.langtable["main:init-error"],
+                            )
+                            new_msg.edit_media(media=media)
+                            opponent_msg.edit_media(media=media)
+                        else:
+                            new_msg.edit_caption(
+                                caption=context.langtable["main:init-error"]
+                            )
+                            opponent_msg.edit_caption(
+                                caption=context.langtable["main:init-error"]
+                            )
 
         else:
-            raise ValueError(
-                f"unknown command {args['command']} for handler {args['target_id']}"
+            context.bot_data["queue"].append(
+                {
+                    "user": update.effective_user,
+                    "msg": update.effective_message,
+                    "chat_id": update.effective_chat.id,
+                    "options": options,
+                }
             )
+            update.effective_message.edit_text(
+                "\n".join(
+                    [
+                        context.langtable["main:awaiting-opponent"],
+                        "",
+                        context.menu.prettify(
+                            options, cast(str, update.effective_user.language_code)
+                        ),
+                    ]
+                ),
+                reply_markup=tg.InlineKeyboardMarkup(
+                    [
+                        [
+                            tg.InlineKeyboardButton(
+                                text=context.langtable["main:cancel-button"],
+                                callback_data=str(core.CallbackData(
+                                    "CANCEL",
+                                    handler_id="MAIN",
+                                    expected_uid=update.effective_user.id,
+                                )),
+                            )
+                        ]
+                    ]
+                ),
+            )
+    elif options["mode"] == "invite":
+        update.effective_message.edit_text(context.langtable["main:invite-sent"])
 
-    elif args["handler_id"] == "core":
-        core.KEYBOARD_COMMANDS[args["command"]](update, context, args["args"])
-    else:
-        if context.bot_data["matches"].get(args["handler_id"]):
-            res = context.bot_data["matches"][args["handler_id"]].handle_input(
-                args["command"], args["args"]
+
+@keyboard_command
+def cancel(update: tg.Update, context: core.BoardGameContext, args: list[str]):
+    assert update.effective_message and update.callback_query and update.effective_user
+    for index, queued in enumerate(context.bot_data["queue"]):
+        if queued["user"] == update.effective_user:
+            del context.bot_data["queue"][index]
+            update.effective_message.edit_text(
+                context.langtable["main:search-cancelled"]
             )
-            update.callback_query.answer(**(res or {}))
+            return
+
+    update.callback_query.answer(context.langtable["main:error-popup-msg"])
+    update.effective_message.edit_reply_markup()
+
+
+@keyboard_command
+def remove_menu(update: tg.Update, context: core.BoardGameContext, args: list[str]):
+    cast(tg.Message, update.effective_message).edit_text(context.langtable["main:search-cancelled"])
+
+
+@keyboard_command
+def accept(update: tg.Update, context: core.BoardGameContext, args: list[str]):
+    assert update.effective_user and update.callback_query
+    challenge = context.db.get_invite(args[0])
+    logging.info(f"invite {args[0]}: {challenge}")
+    if challenge:
+        try:
+            new = core.GroupMatch(
+                challenge["from_user"],
+                update.effective_user,
+                core.InlineMessage(
+                    cast(str, update.callback_query.inline_message_id), context.bot
+                ),
+                options=challenge["options"],
+                dispatcher=context.dispatcher,
+            )
+            context.bot_data["matches"][new.id] = new
+            new.init_turn()
+        except Exception as exc:
+            context.dispatcher.dispatch_error(update, exc)
+            context.bot.edit_message_caption(
+                inline_message_id=cast(str, update.callback_query.inline_message_id),
+                caption=context.langtable["main:init-error"],
+            )
+    else:
+        context.bot.edit_message_text(
+            inline_message_id=update.callback_query.inline_message_id,
+            text=context.langtable["main:invite-not-found"],
+        )
+
+
+@tg_callback(CallbackQueryHandler)
+def button_callback(update: tg.Update, context: core.BoardGameContext):
+    assert update.callback_query
+    args = core.CallbackData.decode(cast(str, update.callback_query.data))
+    logging.debug(f"Handling user input: {args}")
+    if (
+        args.expected_uid
+        and args.expected_uid != update.callback_query.from_user.id
+    ):
+        update.callback_query.answer(
+            text=context.langtable["main:unexpected-uid"],
+            show_alert=True,
+        )
+        return
+
+    if args.handler_id == "MAIN":
+        tg_keyboard_commands[args.command](update, context, args.args)
+    else:
+        if context.bot_data["matches"].get(args.handler_id):
+            res = context.bot_data["matches"][args.handler_id].handle_input(
+                args.command, args.args
+            )
+            update.callback_query.answer(*(res or ()))
         else:
             update.callback_query.answer(
                 text=context.langtable["main:game-not-found-error"]
@@ -950,22 +758,24 @@ def create_app() -> TelegramBotApp:
         format="{levelname} {name}: {message}", style="{", level=logging.INFO
     )
 
-    dispatcher = tg.ext.Dispatcher(
-        tg.ext.ExtBot(os.environ["BOT_TOKEN"], defaults=tg.ext.Defaults(quote=True)),
+    dispatcher = Dispatcher(
+        ExtBot(os.environ["BOT_TOKEN"], defaults=Defaults(quote=True)),
         queue.Queue(),
-        context_types=tg.ext.ContextTypes(context=BoardGameContext),
+        context_types=ContextTypes(context=core.BoardGameContext),
     )
     app = TelegramBotApp(__name__)
     app.dispatcher = dispatcher
-    conn = RedisInterface.from_url(os.environ["REDISCLOUD_URL"])
+    conn = cast(core.RedisInterface, core.RedisInterface.from_url(
+        os.environ["REDISCLOUD_URL"]
+    ))
     dispatcher.bot_data.update(
         {
             "matches": {},
             "queue": [],
             "challenges": {},
             "conn": conn,
-            "group_thread": tg.ext.DelayQueue(),
-            "pm_thread": tg.ext.DelayQueue(burst_limit=20),
+            "group_thread": DelayQueue(),
+            "pm_thread": DelayQueue(burst_limit=20),
             "pending_updates": {},
         }
     )
@@ -980,7 +790,10 @@ def create_app() -> TelegramBotApp:
 
     if hasattr(core, "TEXT_COMMANDS"):
         for cmd, f in core.TEXT_COMMANDS.items():
-            tg_callback(tg.ext.CommandHandler, cmd)(f)
+            tg_handlers.insert(0, CommandHandler(cmd, f))
+
+    if hasattr(core, "KEYBOARD_COMMANDS"):
+        tg_keyboard_commands.update(core.KEYBOARD_COMMANDS)
 
     for handler in tg_handlers:
         dispatcher.add_handler(handler)
@@ -1010,7 +823,7 @@ if __name__ == "__main__":
     elif sys.argv[1] == "db":
         print("Connecting to database...")
         env = json.load(open("debug_env.json"))
-        conn: RedisInterface = RedisInterface.from_url(env["REDISCLOUD_URL"])
+        conn = cast(core.RedisInterface, core.RedisInterface.from_url(env["REDISCLOUD_URL"]))
 
         os.system("clear")
         print(
@@ -1030,7 +843,7 @@ if __name__ == "__main__":
                 memory_sum = 0
                 for key in conn.scan_iter(match="match:*"):
                     count += 1
-                    match = conn.get(key)
+                    match = cast(bytes, conn.get(key))
                     memory_sum += len(match)
                     print(
                         "Match",
@@ -1053,10 +866,10 @@ if __name__ == "__main__":
 
             elif command == "user-stats":
                 print("Number of users per language code:")
-                langcodes = {}
+                langcodes: dict[str, int] = {}
                 all_users = 0
                 for uid in conn.get_user_ids():
-                    userdata = conn.get_user_data()
+                    userdata = conn[uid]
                     langcodes[userdata["lang_code"]] = (
                         langcodes.get(userdata["lang_code"], 0) + 1
                     )

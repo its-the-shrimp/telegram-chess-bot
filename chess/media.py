@@ -1,15 +1,12 @@
 import math
-from typing import Union
-import cv2
-from PIL import Image, ImageDraw, ImageFont
+import cv2   # type: ignore
+from PIL import Image, ImageDraw, ImageFont    # type: ignore
 import numpy
 import os
-import colorsys
-from .core import BoardInfo, Move, MoveEval
-from .parsers import PGNParser, get_moves
+from .core import BoardInfo, GameState, King, Move, MoveEval
+from .parsers import PGNParser
 from .utils import BoardPoint
-from .base import create_match_id, langtable, get_tempfile_url
-from .analysis import eval_pieces_defense, ChessEngine, EvalScore
+from .base import create_match_id, langtable
 
 
 MOVETYPE_COLORS = {
@@ -39,8 +36,8 @@ BOARD = Image.open("images/static/board.png")
 BOARD_OFFSET = (16, 100)
 TILE_SIZE = 60
 
-PIECES = {}
-THUMBS = {}
+PIECES: dict[str, list[Image.Image]] = {}
+THUMBS: dict[str, list[Image.Image]] = {}
 for name in ["Pawn", "King", "Bishop", "Rook", "Queen", "Knight"]:
     PIECES[name] = [
         Image.open(f"images/static/{color}_{name.lower()}.png")
@@ -48,112 +45,115 @@ for name in ["Pawn", "King", "Bishop", "Rook", "Queen", "Knight"]:
     ]
     THUMBS[name] = [piece_img.resize((24, 24)) for piece_img in PIECES[name]]
 
-POINTER = numpy.zeros((50, 50, 4), dtype=numpy.uint8)
-width = POINTER.shape[0] // 2
-for row in range(POINTER.shape[0]):
-    for column in range(POINTER.shape[1]):
+_POINTER = numpy.zeros((50, 50, 4), dtype=numpy.uint8)
+width = _POINTER.shape[0] // 2
+for row in range(_POINTER.shape[0]):
+    for column in range(_POINTER.shape[1]):
         if abs(row - width) + abs(column - width) > round(width * 1.5):
-            POINTER[row][column] = [255, 255, 255, 255]
+            _POINTER[row][column] = [255, 255, 255, 255]
         elif abs(row - width) + abs(column - width) == round(width * 1.5):
-            POINTER[row][column] = [255, 255, 255, 127]
-POINTER = Image.fromarray(POINTER)
+            _POINTER[row][column] = [255, 255, 255, 127]
+POINTER = Image.fromarray(_POINTER)
 
-INCOMING_POINTER = numpy.zeros((50, 50, 4), dtype=numpy.uint8)
-for row in range(INCOMING_POINTER.shape[0]):
-    for column in range(INCOMING_POINTER.shape[1]):
+_INCOMING_POINTER = numpy.zeros((50, 50, 4), dtype=numpy.uint8)
+for row in range(_INCOMING_POINTER.shape[0]):
+    for column in range(_INCOMING_POINTER.shape[1]):
         if abs(row - width) + abs(column - width) < round(width * 0.5):
-            INCOMING_POINTER[row][column] = [255, 255, 255, 255]
+            _INCOMING_POINTER[row][column] = [255, 255, 255, 255]
         elif abs(row - width) + abs(column - width) == round(width * 0.5):
-            INCOMING_POINTER[row][column] = [255, 255, 255, 127]
-INCOMING_POINTER = Image.fromarray(INCOMING_POINTER)
+            _INCOMING_POINTER[row][column] = [255, 255, 255, 127]
+INCOMING_POINTER = Image.fromarray(_INCOMING_POINTER)
+del _POINTER, _INCOMING_POINTER
 
 
-def _imagepos(pos: BoardPoint, size: Union[list, tuple, set]):
-    return [
-        BOARD_OFFSET[0] + TILE_SIZE // 2 + TILE_SIZE * pos.file - size[0] // 2,
+def _imagepos(pos: BoardPoint, width: int, height: int) -> tuple[int, int]:
+    return (
+        BOARD_OFFSET[0] + TILE_SIZE // 2 + TILE_SIZE * pos.file - width // 2,
         BOARD.height
         - BOARD_OFFSET[1]
         - TILE_SIZE // 2
         - TILE_SIZE * pos.rank
-        - size[1] // 2,
-    ]
+        - height // 2,
+    )
 
 
 def _board_image(
     lang_code: str,
-    boards: list["BoardInfo"],
+    moves: list[Move] = [],
+    startpos: BoardInfo = None,
     selected: "BoardPoint" = None,
-    possible_moves: list["Move"] = [],
+    result: GameState = None,
+    possible_moves: list[Move] = [],
     player1_name: str = "",
     player2_name: str = "",
-    move_evaluation: MoveEval = None,
-    pos_evaluation: EvalScore = None,
-    best_move: Move = None,
-    best_move_eval: EvalScore = None,
     custom_bg_pic: Image.Image = None,
-):
+) -> numpy.ndarray:
     board_img = (custom_bg_pic or BOARD).copy()
     editor = ImageDraw.Draw(board_img)
-    if not lang_code:
-        lang_code = "en"
+    lang_code = lang_code or "en"
 
-    for piece in boards[-1].board:
+    if moves:
+        last_board = moves[-1].apply()
+    else:
+        assert startpos is not None, "Neither `moves` nor `startpos` argument is provided."
+        last_board = startpos
+    for piece in last_board.board:
         piece_image = PIECES[type(piece).__name__][int(piece.is_white)]
         if piece.pos == selected:
             board_img.paste(
                 MOVETYPE_COLORS["normal"],
-                box=_imagepos(piece.pos, piece_image.size),
+                box=_imagepos(piece.pos, piece_image.width, piece_image.height),
                 mask=piece_image,
             )
         else:
             board_img.paste(
                 piece_image,
-                box=_imagepos(piece.pos, piece_image.size),
+                box=_imagepos(piece.pos, piece_image.width, piece_image.height),
                 mask=piece_image,
             )
 
-        if type(piece).__name__ == "King" and piece.in_check():
+        if isinstance(piece, King) and piece.in_check():
             board_img.paste(
                 MOVETYPE_COLORS["killing"],
-                box=_imagepos(piece.pos, INCOMING_POINTER.size),
+                box=_imagepos(piece.pos, INCOMING_POINTER.width, INCOMING_POINTER.height),
                 mask=INCOMING_POINTER,
             )
 
     for new_move in possible_moves:
         board_img.paste(
             MOVETYPE_COLORS[new_move.type],
-            box=_imagepos(new_move.dst, POINTER.size),
+            box=_imagepos(new_move.dst, POINTER.width, POINTER.height),
             mask=POINTER,
         )
 
-    prev_moves = list(get_moves(boards))
-    if prev_moves:
-        for move in [prev_moves[-1].src, prev_moves[-1].dst]:
+
+    if moves:
+        for move in [moves[-1].src, moves[-1].dst]:
             board_img.paste(
                 MOVETYPE_COLORS["normal"],
-                box=_imagepos(move, INCOMING_POINTER.size),
+                box=_imagepos(move, INCOMING_POINTER.width, INCOMING_POINTER.height),
                 mask=INCOMING_POINTER,
             )
 
     offset_mult = THUMBS["Pawn"][1].width // 2
     for is_white, y in ((True, 50), (False, 606)):
-        offset = 0
-        for piece_type, count in boards[-1].get_taken_pieces(is_white).items():
+        offset = 0.0
+        for piece_type, count in last_board.get_taken_pieces(is_white).items():
             for i in range(count):
                 board_img.paste(
                     THUMBS[piece_type.__name__][int(is_white)],
                     box=(472 - int(offset * offset_mult), y),
                     mask=THUMBS[piece_type.__name__][int(is_white)],
                 )
-                offset += 1
+                offset += 1.0
             if count:
                 offset += 1.5
 
     editor.text((16, 664), player1_name, fiil="white", font=LARGE_FONT, anchor="ld")
     editor.text((16, 16), player2_name, fill="white", font=LARGE_FONT)
 
-    blacks_value = sum([piece.value for piece in boards[-1].blacks])
-    whites_value = sum([piece.value for piece in boards[-1].whites])
+    blacks_value = sum([piece.value for piece in last_board.blacks])
+    whites_value = sum([piece.value for piece in last_board.whites])
     if blacks_value != whites_value:
         editor.text(
             (496, 664 if whites_value > blacks_value else 16),
@@ -163,8 +163,13 @@ def _board_image(
             anchor="rd" if whites_value > blacks_value else "ra",
         )
 
+    move_evaluation = moves[-1].metadata.get("move_eval") if moves else None
+    pos_evaluation = moves[-1].metadata.get("pos_eval") if moves else None
+    best_move = moves[-1].metadata.get("best_move") if moves else None
+    best_move_eval = moves[-1].metadata.get("best_move_eval") if moves else None
+
     lines = PGNParser.encode_moveseq(
-        moves=prev_moves, result=None, language_code="emoji", turns_per_line=1
+        moves, result=result, language_code="emoji", turns_per_line=1
     ).splitlines()
     max_length = max([SMALL_FONT.getlength(line) for line in lines] + [168])
     space_length = round(SMALL_FONT.getlength(" "))
@@ -201,7 +206,7 @@ def _board_image(
                 anchor="lm",
             )
 
-        padded = tokens[0] + " " + tokens[1]
+        padded = (tokens[0] + " " + tokens[1]) if len(tokens) > 1 else "   " + tokens[0]
         if len(tokens) == 3:
             padded += (
                 " " * round((max_length - cur_line_length) // space_length + 1)
@@ -283,39 +288,8 @@ def _board_image(
     return array
 
 
-def _board_image_with_static_analysis(boards: list[BoardInfo], **kwargs):
-    board_img = BOARD.copy()
-    editor = ImageDraw.Draw(board_img, mode="RGBA")
-    eval_res = eval_pieces_defense(boards[-1])
-    for pos, score in eval_res.items():
-        topleft = _imagepos(pos, (60, 60))
-        if score == 0:
-            h = 0.1667
-        elif score > 0:
-            h = 0.33
-        elif score < 0:
-            h = 0.0
-        editor.rectangle(
-            (*topleft, topleft[0] + 60, topleft[1] + 60),
-            fill=tuple(
-                [
-                    round(i * 255)
-                    for i in colorsys.hls_to_rgb(h, 0.75, 0.7 + abs(score) * 10)
-                ]
-            ),
-        )
-
-    return _board_image(boards, custom_bg_pic=board_img, **kwargs)
-
-
 def board_image(*args, **kwargs) -> bytes:
     return cv2.imencode(".jpg", _board_image(*args, **kwargs))[1].tobytes()
-
-
-def board_image_with_static_analysis(*args, **kwargs) -> bytes:
-    return cv2.imencode(".jpg", _board_image_with_static_analysis(*args, **kwargs))[
-        1
-    ].tobytes()
 
 
 def board_video(
@@ -323,35 +297,38 @@ def board_video(
     lang_code: str,
     player1_name: str = None,
     player2_name: str = None,
-    analyser: ChessEngine = None,
 ) -> tuple[bytes, bytes]:
+    player1_name = player1_name or match.db.get_name(match.player1)
+    player2_name = player2_name or match.db.get_name(match.player2)
     path = os.path.join("images", "temp", create_match_id(n=16) + ".mp4")
     writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 15.0, BOARD.size)
-    for index in range(len(match.boards)):
-        move = match.boards[index] - match.boards[index - 1] if index else None
-        prev_move = (
-            match.boards[index - 1] - match.boards[index - 2] if index > 1 else None
-        )
-        move_eval, best_move, best_move_eval = (
-            analyser.eval_move(move, prev_move=prev_move)
-            if index and analyser
-            else (None, None, None)
-        )
 
+    img_array = _board_image(
+        lang_code,
+        startpos=match.startpos,
+        player1_name=player1_name,
+        player2_name=player2_name,
+    )
+    for i in range(15):
+        writer.write(img_array)
+
+    for index in range(len(match.moves)):
         img_array = _board_image(
             lang_code,
-            match.boards[: index + 1],
+            moves=match.moves[: index + 1],
             player1_name=player1_name or match.db.get_name(match.player1),
             player2_name=player2_name or match.db.get_name(match.player2),
-            move_evaluation=move_eval,
-            best_move=best_move,
-            pos_evaluation=analyser.eval_position(move) if move and analyser else None,
-            best_move_eval=best_move_eval,
         )
-
         for i in range(15):
             writer.write(img_array)
-    for i in range(15):
+    img_array = _board_image(
+        lang_code,
+        moves=match.moves,
+        result=match.state,
+        player1_name=player1_name or match.db.get_name(match.player1),
+        player2_name=player2_name or match.db.get_name(match.player2),
+    )
+    for i in range(30):
         writer.write(img_array)
     writer.release()
 

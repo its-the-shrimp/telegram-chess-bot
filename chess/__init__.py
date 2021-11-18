@@ -23,7 +23,7 @@ from .matches import (
     from_bytes,
     get_pgn_file,
 )
-from .parsers import PGNParser, CGNParser, get_moves
+from .parsers import PGNParser, CGNParser
 
 
 def init(is_debug: bool):
@@ -31,11 +31,66 @@ def init(is_debug: bool):
     BaseMatch.db = get_database()
 
 
+def test_match(update: Update, context: BoardGameContext):
+    if context.args:
+        assert update.effective_message and update.effective_user and update.effective_chat
+        options = context.menu.defaults
+        options["pos"] = " ".join(context.args[:-1])
+        msg = update.effective_chat.send_photo(
+            INVITE_IMAGE,
+            context.langtable["main:starting-match"]
+        )
+        msg2 = None
+        if context.args[-1] == "group":
+            new: BaseMatch = GroupMatch(
+                update.effective_user,
+                update.effective_user,
+                msg,
+                dispatcher=context.dispatcher,
+                options=options,
+            )
+            context.bot_data["matches"][new.id] = new
+        elif context.args[-1] == "pm":
+            msg2 = update.effective_chat.send_photo(
+                INVITE_IMAGE,
+                context.langtable["main:starting-match"]
+            )
+            new = PMMatch(
+                update.effective_user,
+                update.effective_user,
+                msg,
+                msg2,
+                dispatcher=context.dispatcher,
+                options=options
+            )
+        else:
+            new = AIMatch(
+                update.effective_user,
+                context.bot.get_me(),
+                msg,
+                msg2,
+                dispatcher=context.dispatcher,
+                options=options
+            )
+        try:
+            new.init_turn()
+        except Exception as exc:
+            del context.bot_data["matches"][new.id]
+            msg.edit_caption(
+                context.langtable["main:init-error"],
+            )
+            if msg2 is not None:
+                msg2.edit_caption(
+                    context.langtable["main:init-error"]
+                )
+            context.dispatcher.dispatch_error(update, exc)
+
+
 OPTIONS = {
     "ruleset": {"values": {"std-chess": None}},
     "mode": {
         "values": {
-            "online": None,
+            "online": lambda obj: obj["ruleset"] != "custom-pos",
             "vsbot": lambda obj: obj["ruleset"] != "fog-of-war",
             "invite": None,
         },
@@ -54,7 +109,6 @@ OPTIONS = {
         "condition": lambda obj: obj["mode"] == "vsbot",
     },
 }
-KEYBOARD_COMMANDS: dict[
-    str, Callable[[Update, CallbackContext, list[Union[str, int]]], None]
-] = {"DOWNLOAD": get_pgn_file}
+TEXT_COMMANDS: dict[str, TextCommand] = {"test": test_match}
+KEYBOARD_COMMANDS: dict[str, KeyboardCommand] = {"DOWNLOAD": get_pgn_file}
 INVITE_IMAGE = "https://raw.githubusercontent.com/schvv31n/telegram-chess-bot/master/images/static/inline-thumb.jpg"

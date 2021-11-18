@@ -1,13 +1,20 @@
 import re
-from typing import Generator, Iterable, Optional
+from typing import Iterable, Optional, TypedDict, cast
 from .core import BoardInfo, Move, GameState
 from .utils import _reversed, STARTPOS
 from .base import get_dispatcher
 
-
-def get_moves(boards: list["BoardInfo"]) -> Generator["Move", None, None]:
-    for index in range(1, len(boards)):
-        yield boards[index] - boards[index - 1]
+MatchData = TypedDict(
+    "MatchData",
+    {
+        "headers": dict[str, str],
+        "white_name": str,
+        "black_name": str,
+        "result": GameState,
+        "date": Optional[str],
+        "moves": list[Move]
+    },
+)
 
 
 class PGNParser:
@@ -21,33 +28,30 @@ class PGNParser:
         GameState.BLACK_RESIGNED: "1-0",
         GameState.DRAW: "1/2-1/2",
         GameState.FIFTY_MOVE_DRAW: "1/2-1/2",
-        GameState.INSUFFIECENT_MATERIAL_DRAW: "1/2-1/2",
+        GameState.INSUFFICIENT_MATERIAL_DRAW: "1/2-1/2",
         GameState.STALEMATE_DRAW: "1/2-1/2",
         GameState.THREEFOLD_REPETITION_DRAW: "1/2-1/2",
     }
 
     @classmethod
     def decode_moveseq(
-        cls, src: str, startpos: str = STARTPOS
-    ) -> tuple[list["BoardInfo"], GameState]:
-        boards = [BoardInfo.from_fen(startpos)]
+        cls, src: str, startpos: BoardInfo = BoardInfo.from_fen(STARTPOS)
+    ) -> tuple[list[Move], GameState]:
+        moves: list[Move] = []
         *_moves, _result = src.replace("\n", " ").split()
 
-        if _result in ("1/2-1/2", ".5-.5", "0.5-0.5"):
+        if _result in ("1/2-1/2", ".5-.5", "0.5-0.5"):  #   TBD: `match` statement
             result = GameState.DRAW
-        if _result in ("1-0", "0-1"):
-            if "#" in _moves[-1] or "++" in _moves[-1]:
-                result = (
-                    GameState.WHITE_CHECKMATED
-                    if boards[-1].is_white_turn
-                    else GameState.BLACK_CHECKMATED
-                )
-            else:
-                result = (
-                    GameState.WHITE_RESIGNED
-                    if boards[-1].is_white_turn
-                    else GameState.BLACK_RESIGNED
-                )
+        if "#" in _moves[-1] or "++" in _moves[-1]:
+            result = (
+                GameState.BLACK_CHECKMATED
+                if _result == "1-0"
+                else GameState.WHITE_CHECKMATED
+            )
+        elif _result == "1-0":
+            result = GameState.BLACK_RESIGNED
+        elif _result == "0-1":
+            result = GameState.WHITE_RESIGNED
         elif _result == "*":
             result = GameState.CHECK if "+" in _moves[-1] else GameState.NORMAL
         else:
@@ -56,23 +60,22 @@ class PGNParser:
 
         for token in _moves:
             if not (token[:-1].isdigit() and token[-1] == "."):
-                boards.append(boards[-1] + Move.from_pgn(token, boards[-1]))
+                moves.append(
+                    Move.from_pgn(token, moves[-1].apply() if moves else startpos)
+                )
 
-        return boards, result
+        return moves, result
 
     @classmethod
     def encode_moveseq(
         cls,
-        moves: list["Move"] = None,
-        positions: Iterable["BoardInfo"] = None,
+        moves: list["Move"],
         result: Optional[GameState] = GameState.NORMAL,
         language_code: str = "en",
         line_length=80,
         turns_per_line=None,
     ) -> str:
         res = []
-        if moves is None:
-            moves = get_moves(positions)
 
         for index, move in enumerate(moves):
             if index % 2 == 0:
@@ -101,55 +104,61 @@ class PGNParser:
             return " ".join(res)
 
     @classmethod
-    def decode(cls, src: str) -> dict:
-        raw_headers, moves = src.split("\n\n")
-        res = {"headers": {}}
+    def decode(cls, src: str) -> MatchData:
+        raw_headers, _moves = src.split("\n\n")
+        _res = {}
 
         for header in raw_headers.splitlines():
             _key, _value = header.split(" ", maxsplit=1)
-            res["headers"][_key[1:]] = _value[1:-2]
-        res["white_name"] = res["headers"]["White"]
-        res["black_name"] = res["headers"]["Black"]
-        res["date"] = res["headers"]["Date"]
-        del res["headers"]["Date"], res["headers"]["White"], res["headers"]["Black"]
+            _res[_key[1:]] = _value[1:-2]
 
-        res["boards"], res["result"] = cls.decode_moveseq(
-            moves, startpos=res["headers"].get("FEN", STARTPOS)
+        moves, result = cls.decode_moveseq(
+            _moves, startpos=BoardInfo.from_fen(_res.get("FEN", STARTPOS))
         )
-        for key in ["FEN", "Result"]:
+        res = MatchData(
+            white_name=_res["White"], 
+            black_name=_res["black"], 
+            date=_res["date"],
+            moves=moves,
+            result=result,
+            headers=_res
+        )
+
+        for key in ["FEN", "Result", "Date", "White", "Black"]:
             if key in res["headers"]:
                 del res["headers"][key]
+
         return res
 
     @classmethod
     def encode(
         cls,
-        boards: Iterable["BoardInfo"] = [],
-        white_name: str = "?",
-        black_name: str = "?",
-        date: str = "?",
+        moves: list[Move],
+        white_name: str = None,
+        black_name: str = None,
+        date: str = None,
         result: GameState = GameState.NORMAL,
         headers: dict[str, str] = {},
     ):
         std_headers = {
             "Event": "Online Chess on Telegram",
             "Site": get_dispatcher().bot.link,
-            "Date": date,
+            "Date": date or "?",
             "Round": "-",
-            "White": white_name,
-            "Black": black_name,
+            "White": white_name or "?",
+            "Black": black_name or "?",
             "Result": cls.RESULT_CODES[result],
         }
-        startpos = boards[0].get_fen()
+        startpos = moves[0].board.get_fen()
         if startpos != STARTPOS:
             std_headers["FEN"] = startpos
-        headers = std_headers | headers
+        std_headers.update(headers)
 
         return "\n".join(
             [
-                "\n".join([f'[{k} "{v}"]' for k, v in headers.items()]),
+                "\n".join([f'[{k} "{v}"]' for k, v in std_headers.items()]),
                 "",
-                cls.encode_moveseq(positions=boards, result=result),
+                cls.encode_moveseq(moves, result=result),
             ]
         )
 
@@ -164,7 +173,7 @@ class CGNParser:
         GameState.BLACK_RESIGNED: b"BR",
         GameState.DRAW: b"AD",
         GameState.FIFTY_MOVE_DRAW: b"FMD",
-        GameState.INSUFFIECENT_MATERIAL_DRAW: b"IMD",
+        GameState.INSUFFICIENT_MATERIAL_DRAW: b"IMD",
         GameState.STALEMATE_DRAW: b"SD",
         GameState.THREEFOLD_REPETITION_DRAW: b"TRD",
     }
@@ -179,55 +188,55 @@ class CGNParser:
         return re.sub("#[#NT]", lambda match: cls.SPECIAL_CHARS[match[0]], src)
 
     @classmethod
-    def decode(cls, src: bytes) -> dict:
-        data = {"headers": dict(x.split(b"\t") for x in src.splitlines())}
-        data["white_name"] = data["headers"].get(b"W").decode()
-        data["black_name"] = data["headers"].get(b"B").decode()
-        data["date"] = (
-            data["headers"][b"D"].decode() if b"D" in data["headers"] else None
+    def decode(cls, src: bytes) -> MatchData:
+        data: dict[bytes, bytes] = dict(cast(tuple[bytes, bytes], x.split(b"\t")) for x in src.splitlines())
+        res = MatchData(
+            white_name=data[b"W"].decode(),
+            black_name=data[b"B"].decode(),
+            date=data[b"D"].decode() if b"D" in data else None,
+            result=_reversed(cls.RESULT_CODES)[data.get(b"R", b"*")],
+            moves=[],
+            headers={}
         )
-        data["result"] = _reversed(cls.RESULT_CODES)[data["headers"].get(b"R", b"*")]
 
-        data["boards"] = [
-            BoardInfo.from_fen(data["headers"].get(b"S", STARTPOS.encode()).decode())
-        ]
-        for move in zip(data["headers"][b"M"][::2], data["headers"][b"M"][1::2]):
-            data["boards"].append(
-                data["boards"][-1]
-                + Move.from_hash(
-                    int.from_bytes(b"%c%c" % move, byteorder="big"), data["boards"][-1]
+        last_pos = BoardInfo.from_fen(
+            data.get(b"S", STARTPOS.encode()).decode()
+        )
+        for move in zip(data[b"M"][::2], data[b"M"][1::2]):
+            res["moves"].append(
+                Move.from_hash(
+                    int.from_bytes(b"%c%c" % move, byteorder="big"), last_pos
                 )
             )
+            last_pos = res["moves"][-1].apply()
 
-        for k in b"WRBDSM":
-            if b"%c" % k in data["headers"]:
-                del data["headers"][b"%c" % k]
-        data["headers"] = {
-            k.decode(): cls.unescape(v.decode()) for k, v in data["headers"].items()
-        }
+        for k in [b"W", b"R", b"B", b"D", b"S", b"M"]:
+            if k in data:
+                del data[k]
+        res["headers"] = {k.decode(): cls.unescape(v.decode()) for k, v in data.items()}
 
-        return data
+        return res
 
     @classmethod
     def encode(
         cls,
-        boards: Iterable["BoardInfo"] = [],
-        white_name: str = "?",
-        black_name: str = "?",
-        date: str = "?",
+        moves: Iterable[Move],
+        white_name: str = None,
+        black_name: str = None,
+        date: str = None,
         result: GameState = GameState.NORMAL,
         headers: dict[str, str] = {},
-    ):
+    ) -> bytes:
         res = {
             b"M": b"",
-            b"W": white_name.encode(),
-            b"B": black_name.encode(),
+            b"W": (white_name or "?").encode(),
+            b"B": (black_name or "?").encode(),
             b"R": cls.RESULT_CODES[result],
+            b"D": (date or "?").encode()
         }
-        res[b"D"] = date.encode()
         res.update({k.encode(): cls.escape(v).encode() for k, v in headers.items()})
 
-        for move in get_moves(boards):
+        for move in moves:
             res[b"M"] += hash(move).to_bytes(2, byteorder="big")
 
         return b"\n".join([k + b"\t" + v for k, v in res.items()])

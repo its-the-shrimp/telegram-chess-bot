@@ -8,3 +8,4 @@ chess/__pycache__
 images/temp/*
 test*
 debug*
+.mypy_cache

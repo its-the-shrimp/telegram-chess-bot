@@ -11,8 +11,8 @@ def _reversed(src: dict):
 
 
 class BoardPoint:
-    row: int
-    column: int
+    rank: int
+    file: int
 
     @overload
     def __new__(cls, src: str):
