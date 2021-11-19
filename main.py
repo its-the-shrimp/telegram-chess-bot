@@ -28,13 +28,11 @@ from telegram.ext import (
 import chess as core
 import difflib
 import logging
-import re
 import traceback
 import flask
 import time
 
 
-INLINE_OPTION_PATTERN = re.compile(r"\w+:\d")
 flask_callbacks: list[tuple[tuple, dict]] = []
 tg_handlers: list[Handler] = []
 tg_keyboard_commands: dict[str, core.KeyboardCommand] = {}
@@ -246,8 +244,8 @@ def send_invite_inline(update: tg.Update, context: core.BoardGameContext) -> Non
         results=(
             tg.InlineQueryResultPhoto(
                 match_id,
-                core.INVITE_IMAGE,
-                core.INVITE_IMAGE,
+                core.get_file_url(core.INVITE_IMAGE),
+                core.get_file_url(core.INVITE_IMAGE),
                 title=context.langtable["main:send-challenge"],
                 description=challenge_desc,
                 caption=context.langtable["main:invite-msg"].format(
@@ -477,7 +475,7 @@ def play(update: tg.Update, context: core.BoardGameContext, args: list[str]):
     if options["mode"] == "vsbot":
         update.effective_message.edit_text(context.langtable["main:match-found"])
         new_msg = update.effective_chat.send_photo(
-            core.INVITE_IMAGE, caption=context.langtable["main:starting-match"]
+            core.get_file_url(core.INVITE_IMAGE), caption=context.langtable["main:starting-match"]
         )
         new: core.BaseMatch = core.AIMatch(
             update.effective_user,
@@ -495,7 +493,7 @@ def play(update: tg.Update, context: core.BoardGameContext, args: list[str]):
             if hasattr(core, "ERROR_IMAGE"):
                 new_msg.edit_media(
                     media=tg.InputMediaPhoto(
-                        core.ERROR_IMAGE,   # type: ignore
+                        core.get_file_url(core.ERROR_IMAGE),   # type: ignore
                         caption=context.langtable["main:init-error"],
                     )
                 )
@@ -547,7 +545,7 @@ def play(update: tg.Update, context: core.BoardGameContext, args: list[str]):
                 )
                 opponent["msg"].edit_text(context.langtable["main:match-found"])
                 new_msg = update.effective_chat.send_photo(
-                    core.INVITE_IMAGE,
+                    core.get_file_url(core.INVITE_IMAGE),
                     caption=context.langtable["main:starting-match"],
                 )
                 if opponent["chat_id"] == update.effective_chat.id:
@@ -566,7 +564,7 @@ def play(update: tg.Update, context: core.BoardGameContext, args: list[str]):
                         if hasattr(core, "ERROR_IMAGE"):
                             new_msg.edit_media(
                                 media=tg.InputMediaPhoto(
-                                    core.ERROR_IMAGE,   # type: ignore
+                                    core.get_file_url(core.ERROR_IMAGE),   # type: ignore
                                     caption=context.langtable["main:init-error"],
                                 )
                             )
@@ -579,7 +577,7 @@ def play(update: tg.Update, context: core.BoardGameContext, args: list[str]):
                 else:
                     opponent_msg = context.bot.send_photo(
                         opponent["chat_id"],
-                        core.INVITE_IMAGE,
+                        core.get_file_url(core.INVITE_IMAGE),
                         caption=context.langtable["main:starting-match"],
                     )
                     new = core.PMMatch(
@@ -597,7 +595,7 @@ def play(update: tg.Update, context: core.BoardGameContext, args: list[str]):
                         del context.bot_data["matches"][new.id]
                         if hasattr(core, "ERROR_IMAGE"):
                             media = tg.InputMediaPhoto(
-                                core.ERROR_IMAGE,    # type: ignore
+                                core.get_file_url(core.ERROR_IMAGE),    # type: ignore
                                 context.langtable["main:init-error"],
                             )
                             new_msg.edit_media(media=media)
@@ -741,13 +739,21 @@ def process_update():
 @flask_callback(f"/{os.environ['BOT_TOKEN']}/dynamic/<filename>")
 def fetch_dynamic(filename):
     path = os.path.join("images", "temp", filename)
-    data = io.BytesIO(open(path, "rb").read())
-    os.remove(path)
+    try:
+        data = io.BytesIO(open(path, "rb").read())
+        os.remove(path)
+    except FileNotFoundError as exc:
+        if hasattr(core, "ERROR_IMAGE"):
+            path = os.path.join("images", "static", core.ERROR_IMAGE)
+            data = io.BytesIO(open(path, "rb").read())
+        else:
+            raise exc
     return flask.send_file(data, download_name=filename)
 
 
 @flask_callback(f"/{os.environ['BOT_TOKEN']}/static/<filename>")
 def fetch_static(filename):
+    print("Fetching static content", filename)
     return flask.send_file(
         os.path.join("images", "static", filename), download_name=filename
     )

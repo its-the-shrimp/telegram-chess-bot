@@ -113,7 +113,7 @@ class BasePiece:
             for _diff in diff_seq:
                 diff = [_diff[0], _diff[1]]
                 if cls == Pawn:
-                    if not is_white or reverse:
+                    if not is_white != reverse:
                         diff[1] *= -1
                     if abs(diff[1]) == 2 and ((pos.rank != (3 if reverse else 1)) if is_white else (pos.rank != (4 if reverse else 6))):
                         continue

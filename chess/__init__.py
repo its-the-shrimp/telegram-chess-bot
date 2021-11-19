@@ -37,8 +37,8 @@ def test_match(update: Update, context: BoardGameContext):
         options = context.menu.defaults
         options["pos"] = " ".join(context.args[:-1])
         msg = update.effective_chat.send_photo(
-            INVITE_IMAGE,
-            context.langtable["main:starting-match"]
+            get_file_url(INVITE_IMAGE),
+            caption=context.langtable["main:starting-match"]
         )
         msg2 = None
         if context.args[-1] == "group":
@@ -52,7 +52,7 @@ def test_match(update: Update, context: BoardGameContext):
             context.bot_data["matches"][new.id] = new
         elif context.args[-1] == "pm":
             msg2 = update.effective_chat.send_photo(
-                INVITE_IMAGE,
+                get_file_url(INVITE_IMAGE),
                 context.langtable["main:starting-match"]
             )
             new = PMMatch(
@@ -111,4 +111,5 @@ OPTIONS = {
 }
 TEXT_COMMANDS: dict[str, TextCommand] = {"test": test_match}
 KEYBOARD_COMMANDS: dict[str, KeyboardCommand] = {"DOWNLOAD": get_pgn_file}
-INVITE_IMAGE = "https://raw.githubusercontent.com/schvv31n/telegram-chess-bot/master/images/static/inline-thumb.jpg"
+ERROR_IMAGE = "error-404.jpg"
+INVITE_IMAGE = "inline-thumb.jpg"

@@ -499,7 +499,7 @@ def get_tempfile_url(data: bytes, mimetype: str) -> str:
     Returns: `str` - URL to the data.
     """
     extension = mimetypes.guess_extension(mimetype)
-    assert extension is not None, "Unknown file format"
+    assert extension is not None, f"Unknown file format: {mimetype}"
     filename = "".join(["temp", uuid.uuid4().hex, extension])
     open(os.path.join("images", "temp", filename), "wb").write(data)
     return "/".join(
