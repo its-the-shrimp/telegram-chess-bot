@@ -80,7 +80,7 @@ def get_pgn_file(
 
 def from_bytes(src: bytes, dispatcher: Dispatcher, id: str) -> "BaseMatch":
     obj = parsers.CGNParser.decode(src)
-    if "INLINE" in obj["headers"]:
+    if "CID" in obj["headers"]:
         return GroupMatch._from_cgn(obj, dispatcher, id)
     elif "difficulty" in obj["headers"]["OPTIONS"]:
         return AIMatch._from_cgn(obj, dispatcher, id)
