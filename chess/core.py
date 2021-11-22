@@ -133,6 +133,8 @@ class BasePiece:
                     and not (reverse and pos == board.enpassant_pos[1])
                 ):
                     break
+                elif cls == Pawn and diff[0] == 0 and move in enemies_pos:
+                    break
                 elif not move:
                     break
 
