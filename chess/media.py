@@ -1,6 +1,6 @@
 import math
-import cv2   # type: ignore
-from PIL import Image, ImageDraw, ImageFont    # type: ignore
+import cv2  # type: ignore
+from PIL import Image, ImageDraw, ImageFont  # type: ignore
 import numpy
 import os
 from .core import BoardInfo, GameState, King, Move, MoveEval
@@ -95,7 +95,9 @@ def _board_image(
     if moves:
         last_board = moves[-1].apply()
     else:
-        assert startpos is not None, "Neither `moves` nor `startpos` argument is provided."
+        assert (
+            startpos is not None
+        ), "Neither `moves` nor `startpos` argument is provided."
         last_board = startpos
     for piece in last_board.board:
         piece_image = PIECES[type(piece).__name__][int(piece.is_white)]
@@ -115,7 +117,9 @@ def _board_image(
         if isinstance(piece, King) and piece.in_check():
             board_img.paste(
                 MOVETYPE_COLORS["killing"],
-                box=_imagepos(piece.pos, INCOMING_POINTER.width, INCOMING_POINTER.height),
+                box=_imagepos(
+                    piece.pos, INCOMING_POINTER.width, INCOMING_POINTER.height
+                ),
                 mask=INCOMING_POINTER,
             )
 
@@ -125,7 +129,6 @@ def _board_image(
             box=_imagepos(new_move.dst, POINTER.width, POINTER.height),
             mask=POINTER,
         )
-
 
     if moves:
         for move in [moves[-1].src, moves[-1].dst]:

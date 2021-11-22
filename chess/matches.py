@@ -11,7 +11,7 @@ from telegram import (
     Chat,
     Bot,
     Update,
-    CallbackQuery
+    CallbackQuery,
 )
 import logging
 import datetime
@@ -49,13 +49,15 @@ def _get_pgn_file(update: Update, context: base.BoardGameContext, args: tuple):
     )
 
 
-def get_pgn_file(update: Update, context: base.BoardGameContext, args: list[str]) -> None:
+def get_pgn_file(
+    update: Update, context: base.BoardGameContext, args: list[str]
+) -> None:
     raw = context.db.get(f"{args[0]}:pgn")
     if update.effective_message is not None:
         update.effective_message.edit_reply_markup()
 
     if raw is not None:
-        
+
         content = gzip.decompress(raw)
         if update.effective_message is not None:
             update.effective_message.reply_document(
@@ -74,9 +76,6 @@ def get_pgn_file(update: Update, context: base.BoardGameContext, args: list[str]
         cast(CallbackQuery, update.callback_query).answer(
             context.langtable["pgn-fetch-error"], show_alert=True
         )
-
-
-
 
 
 def from_bytes(src: bytes, dispatcher: Dispatcher, id: str) -> "BaseMatch":
@@ -113,7 +112,9 @@ class BaseMatch:
         )
         self.moves: list[core.Move] = []
         self.state: core.GameState = core.GameState.NORMAL
-        self.date: Optional[str] = date or datetime.datetime.now().strftime(utils.DATE_FORMAT)
+        self.date: Optional[str] = date or datetime.datetime.now().strftime(
+            utils.DATE_FORMAT
+        )
         self.id: str = id or base.create_match_id()
         self.draw_offered: bool = False
 
@@ -143,12 +144,14 @@ class BaseMatch:
             res.append(
                 InlineKeyboardButton(
                     text=button["text"],
-                    callback_data=str(base.CallbackData(
-                        button["data"][0],
-                        args=button["data"][1:],
-                        expected_uid=expected_uid,
-                        handler_id=handler_id or self.id,
-                    )),
+                    callback_data=str(
+                        base.CallbackData(
+                            button["data"][0],
+                            args=button["data"][1:],
+                            expected_uid=expected_uid,
+                            handler_id=handler_id or self.id,
+                        )
+                    ),
                 )
             )
 
@@ -229,9 +232,9 @@ class BaseMatch:
             logging.info("Analysis video created")
 
             new_msg = InputMediaVideo(
-                base.get_tempfile_url(video, "video/mp4"),
+                base.get_temp_url(video, "video/mp4"),
                 caption=text,
-                thumb=base.get_tempfile_url(thumb, "image/jpeg"),
+                thumb=base.get_temp_url(thumb, "image/jpeg"),
             )
             self.db.set(
                 f"{self.id}:pgn",
@@ -247,45 +250,58 @@ class BaseMatch:
                 ex=3600 * 48,
             )
             if isinstance(self, GroupMatch):
-                self.msg = cast(Union[Message, base.InlineMessage], self.msg.edit_media(
-                    media=new_msg,
-                    reply_markup=self._keyboard(
-                        [
-                            {
-                                "text": base.langtable[lang_code]["download-pgn"],
-                                "data": ["DOWNLOAD", self.id],
-                            }
-                        ],
-                        handler_id="MAIN",
+                self.msg = cast(
+                    Union[Message, base.InlineMessage],
+                    self.msg.edit_media(
+                        media=new_msg,
+                        reply_markup=self._keyboard(
+                            [
+                                {
+                                    "text": base.langtable[lang_code]["download-pgn"],
+                                    "data": ["DOWNLOAD", self.id],
+                                }
+                            ],
+                            handler_id="MAIN",
+                        ),
                     ),
-                ))
+                )
             elif isinstance(self, PMMatch):
                 if self.player_msg:
-                    self.player_msg = cast(Message, self.player_msg.edit_media(
-                        media=new_msg,
-                        reply_markup=self._keyboard(
-                            [
-                                {
-                                    "text": base.langtable[lang_code]["download-pgn"],
-                                    "data": ["DOWNLOAD", self.id],
-                                }
-                            ],
-                            handler_id="MAIN",
+                    self.player_msg = cast(
+                        Message,
+                        self.player_msg.edit_media(
+                            media=new_msg,
+                            reply_markup=self._keyboard(
+                                [
+                                    {
+                                        "text": base.langtable[lang_code][
+                                            "download-pgn"
+                                        ],
+                                        "data": ["DOWNLOAD", self.id],
+                                    }
+                                ],
+                                handler_id="MAIN",
+                            ),
                         ),
-                    ))
+                    )
                 elif self.opponent_msg:
-                    self.opponent_msg = cast(Message, self.opponent_msg.edit_media(
-                        media=new_msg,
-                        reply_markup=self._keyboard(
-                            [
-                                {
-                                    "text": base.langtable[lang_code]["download-pgn"],
-                                    "data": ["DOWNLOAD", self.id],
-                                }
-                            ],
-                            handler_id="MAIN",
+                    self.opponent_msg = cast(
+                        Message,
+                        self.opponent_msg.edit_media(
+                            media=new_msg,
+                            reply_markup=self._keyboard(
+                                [
+                                    {
+                                        "text": base.langtable[lang_code][
+                                            "download-pgn"
+                                        ],
+                                        "data": ["DOWNLOAD", self.id],
+                                    }
+                                ],
+                                handler_id="MAIN",
+                            ),
                         ),
-                    ))
+                    )
                 else:
                     raise ValueError("shit")
             else:
@@ -295,12 +311,19 @@ class BaseMatch:
             self.dispatcher.dispatch_error(None, exc)
             text += "\n\n" + base.langtable[lang_code]["visualization-error"]
             if isinstance(self, GroupMatch):
-                self.msg = cast(Union[Message, base.InlineMessage], self.msg.edit_caption(caption=text))
+                self.msg = cast(
+                    Union[Message, base.InlineMessage],
+                    self.msg.edit_caption(caption=text),
+                )
             elif isinstance(self, PMMatch):
                 if self.player_msg:
-                    self.player_msg = cast(Message, self.player_msg.edit_caption(caption=text))
+                    self.player_msg = cast(
+                        Message, self.player_msg.edit_caption(caption=text)
+                    )
                 if self.opponent_msg:
-                    self.opponent_msg = cast(Message, self.opponent_msg.edit_caption(caption=text))
+                    self.opponent_msg = cast(
+                        Message, self.opponent_msg.edit_caption(caption=text)
+                    )
 
         if not isinstance(self, AIMatch):
             if self.state in (
@@ -368,7 +391,7 @@ class BaseMatch:
         )
 
         last_boardimg = InputMediaPhoto(
-            base.get_tempfile_url(
+            base.get_temp_url(
                 media.board_image(
                     lang_code,
                     moves=self.moves,
@@ -387,12 +410,19 @@ class BaseMatch:
         )
         if hasattr(self, "msg"):
             cast(Union[Message, base.InlineMessage], self.msg)
-            self.msg = cast(Union[Message, base.InlineMessage], self.msg.edit_media(media=last_boardimg))
+            self.msg = cast(
+                Union[Message, base.InlineMessage],
+                self.msg.edit_media(media=last_boardimg),
+            )
         elif hasattr(self, "player_msg"):
             if self.player_msg:
-                self.player_msg = cast(Message, self.player_msg.edit_media(last_boardimg))
+                self.player_msg = cast(
+                    Message, self.player_msg.edit_media(last_boardimg)
+                )
             if self.opponent_msg:
-                self.opponent_msg = cast(Message, self.opponent_msg.edit_media(last_boardimg))
+                self.opponent_msg = cast(
+                    Message, self.opponent_msg.edit_media(last_boardimg)
+                )
         eval_thread.start()
 
     def init_turn(self, move: core.Move = None) -> None:
@@ -425,7 +455,9 @@ class GroupMatch(BaseMatch):
             headers={
                 "WUID": hex(self.player1.id)[2:],
                 "BUID": hex(self.player2.id)[2:],
-                "CID": hex(self.msg.chat_id)[2:] if not isinstance(self.msg, base.InlineMessage) else "0",
+                "CID": hex(self.msg.chat_id)[2:]
+                if not isinstance(self.msg, base.InlineMessage)
+                else "0",
                 "MID": hex(self.msg.message_id)[2:]
                 if isinstance(self.msg, Message)
                 else self.msg.message_id,
@@ -435,7 +467,9 @@ class GroupMatch(BaseMatch):
         )
 
     @classmethod
-    def _from_cgn(cls, obj: parsers.MatchData, dispatcher: Dispatcher, id: str) -> "GroupMatch":
+    def _from_cgn(
+        cls, obj: parsers.MatchData, dispatcher: Dispatcher, id: str
+    ) -> "GroupMatch":
         player1 = User(
             int(obj["headers"]["WUID"], 16),
             obj["white_name"],
@@ -450,7 +484,10 @@ class GroupMatch(BaseMatch):
         )
 
         if obj["headers"]["CID"] == "0":
-            msg = cast(Union[Message, base.InlineMessage], base.InlineMessage(obj["headers"]["MID"], dispatcher.bot))
+            msg = cast(
+                Union[Message, base.InlineMessage],
+                base.InlineMessage(obj["headers"]["MID"], dispatcher.bot),
+            )
         else:
             msg = Message(
                 int(obj["headers"]["MID"], 16),
@@ -484,9 +521,10 @@ class GroupMatch(BaseMatch):
 
             self.init_msg_text += "\n"
             if self.state == core.GameState.CHECK:
-                self.init_msg_text += langtable["opponent-in-check"].format(
-                    name=self.db.get_name(player)
-                ) + "\n"
+                self.init_msg_text += (
+                    langtable["opponent-in-check"].format(name=self.db.get_name(player))
+                    + "\n"
+                )
 
             self.init_msg_text += langtable["opponent-to-move"].format(
                 name=self.db.get_name(player)
@@ -495,7 +533,7 @@ class GroupMatch(BaseMatch):
                 self.init_msg_text += "\n" + langtable["player-to-accept-draw"]
                 keyboard = [
                     {"text": langtable["decline-button"], "data": ["TURN"]},
-                    {"text": langtable["accept-button"], "data": ["ACCEPT_DRAW"]}
+                    {"text": langtable["accept-button"], "data": ["ACCEPT_DRAW"]},
                 ]
             else:
                 self.init_msg_text += "\n" + langtable["player-to-move"]
@@ -516,28 +554,31 @@ class GroupMatch(BaseMatch):
                             }
                         )
 
-            self.msg = cast(Union[Message, base.InlineMessage], self.msg.edit_media(
-                media=InputMediaPhoto(
-                    base.get_tempfile_url(
-                        media.board_image(
-                            player.language_code,
-                            moves=self.moves,
-                            startpos=self.startpos,
-                            player1_name=self.db.get_name(self.player1),
-                            player2_name=self.db.get_name(self.player2),
+            self.msg = cast(
+                Union[Message, base.InlineMessage],
+                self.msg.edit_media(
+                    media=InputMediaPhoto(
+                        base.get_temp_url(
+                            media.board_image(
+                                player.language_code,
+                                moves=self.moves,
+                                startpos=self.startpos,
+                                player1_name=self.db.get_name(self.player1),
+                                player2_name=self.db.get_name(self.player2),
+                            ),
+                            "image/jpeg",
                         ),
-                        "image/jpeg",
+                        caption=self.init_msg_text,
                     ),
-                    caption=self.init_msg_text,
+                    reply_markup=self._keyboard(
+                        cast(list[_CallbackDataInput], keyboard),
+                        expected_uid=player.id,
+                        head_item=True,
+                    ),
                 ),
-                reply_markup=self._keyboard(
-                    cast(list[_CallbackDataInput], keyboard), expected_uid=player.id, head_item=True
-                ),
-            ))
+            )
 
-    def handle_input(
-        self, command: str, args: list[str]
-    ) -> Optional[tuple[str, bool]]:
+    def handle_input(self, command: str, args: list[str]) -> Optional[tuple[str, bool]]:
         try:
             player, opponent = self.players
             langtable = base.langtable[player.language_code]
@@ -546,24 +587,27 @@ class GroupMatch(BaseMatch):
             if command == "OTHER":
                 new_text = self.init_msg_text.split("\n")
                 new_text[-1] = langtable["player-to-choose-action"]
-                self.msg = cast(Union[Message, base.InlineMessage], self.msg.edit_caption(
-                    caption="\n".join(new_text),
-                    reply_markup=self._keyboard(
-                        [
-                            {"text": langtable["back-button"], "data": ["TURN"]},
-                            {
-                                "text": langtable["resign-button"],
-                                "data": ["RESIGN"],
-                            },
-                            {
-                                "text": langtable["draw-offer-button"],
-                                "data": ["OFFER_DRAW"],
-                            },
-                        ],
-                        expected_uid=player.id,
-                        head_item=True
+                self.msg = cast(
+                    Union[Message, base.InlineMessage],
+                    self.msg.edit_caption(
+                        caption="\n".join(new_text),
+                        reply_markup=self._keyboard(
+                            [
+                                {"text": langtable["back-button"], "data": ["TURN"]},
+                                {
+                                    "text": langtable["resign-button"],
+                                    "data": ["RESIGN"],
+                                },
+                                {
+                                    "text": langtable["draw-offer-button"],
+                                    "data": ["OFFER_DRAW"],
+                                },
+                            ],
+                            expected_uid=player.id,
+                            head_item=True,
+                        ),
                     ),
-                ))
+                )
 
             elif command == "TURN":
                 if self.draw_offered:
@@ -586,24 +630,29 @@ class GroupMatch(BaseMatch):
                             }
                         )
 
-                self.msg = cast(Union[Message, base.InlineMessage], self.msg.edit_media(
-                    media=InputMediaPhoto(
-                        base.get_tempfile_url(
-                            media.board_image(
-                                player.language_code,
-                                moves=self.moves,
-                                startpos=self.startpos,
-                                player1_name=self.db.get_name(self.player1),
-                                player2_name=self.db.get_name(self.player2),
+                self.msg = cast(
+                    Union[Message, base.InlineMessage],
+                    self.msg.edit_media(
+                        media=InputMediaPhoto(
+                            base.get_temp_url(
+                                media.board_image(
+                                    player.language_code,
+                                    moves=self.moves,
+                                    startpos=self.startpos,
+                                    player1_name=self.db.get_name(self.player1),
+                                    player2_name=self.db.get_name(self.player2),
+                                ),
+                                "image/jpeg",
                             ),
-                            "image/jpeg",
+                            caption=self.init_msg_text,
                         ),
-                        caption=self.init_msg_text,
+                        reply_markup=self._keyboard(
+                            cast(list[_CallbackDataInput], piece_buttons),
+                            expected_uid=player.id,
+                            head_item=True,
+                        ),
                     ),
-                    reply_markup=self._keyboard(
-                        cast(list[_CallbackDataInput], piece_buttons), expected_uid=player.id, head_item=True
-                    ),
-                ))
+                )
                 if self.draw_offered and len(args) == 0:
                     self.draw_offered = False
                     return (langtable["draw-offer-declined"], False)
@@ -652,26 +701,31 @@ class GroupMatch(BaseMatch):
                 new_text = self.init_msg_text.split("\n")
                 new_text[-1] = langtable["player-to-choose-dest"]
 
-                self.msg = cast(Union[Message, base.InlineMessage], self.msg.edit_media(
-                    media=InputMediaPhoto(
-                        base.get_tempfile_url(
-                            media.board_image(
-                                player.language_code,
-                                moves=self.moves,
-                                startpos=self.startpos,
-                                selected=pos,
-                                possible_moves=moves,
-                                player1_name=self.db.get_name(self.player1),
-                                player2_name=self.db.get_name(self.player2),
+                self.msg = cast(
+                    Union[Message, base.InlineMessage],
+                    self.msg.edit_media(
+                        media=InputMediaPhoto(
+                            base.get_temp_url(
+                                media.board_image(
+                                    player.language_code,
+                                    moves=self.moves,
+                                    startpos=self.startpos,
+                                    selected=pos,
+                                    possible_moves=moves,
+                                    player1_name=self.db.get_name(self.player1),
+                                    player2_name=self.db.get_name(self.player2),
+                                ),
+                                "image/jpeg",
                             ),
-                            "image/jpeg",
+                            caption="\n".join(new_text),
                         ),
-                        caption="\n".join(new_text),
+                        reply_markup=self._keyboard(
+                            cast(list[_CallbackDataInput], dest_buttons),
+                            expected_uid=player.id,
+                            head_item=True,
+                        ),
                     ),
-                    reply_markup=self._keyboard(
-                        cast(list[_CallbackDataInput], dest_buttons), expected_uid=player.id, head_item=True
-                    ),
-                ))
+                )
 
             elif command == "PROMOTION_MENU":
                 src = utils.BoardPoint(args[0])
@@ -700,24 +754,30 @@ class GroupMatch(BaseMatch):
                 new_text = self.init_msg_text.split("\n")
                 new_text[-1] = langtable["player-to-promote"]
 
-                self.msg = cast(Union[Message, base.InlineMessage], self.msg.edit_media(
-                    media=InputMediaPhoto(
-                        base.get_tempfile_url(
-                            media.board_image(
-                                player.language_code,
-                                moves=self.moves,
-                                startpos=self.startpos,
-                                selected=src,
-                                possible_moves=[move],
-                                player1_name=self.db.get_name(self.player1),
-                                player2_name=self.db.get_name(self.player2),
+                self.msg = cast(
+                    Union[Message, base.InlineMessage],
+                    self.msg.edit_media(
+                        media=InputMediaPhoto(
+                            base.get_temp_url(
+                                media.board_image(
+                                    player.language_code,
+                                    moves=self.moves,
+                                    startpos=self.startpos,
+                                    selected=src,
+                                    possible_moves=[move],
+                                    player1_name=self.db.get_name(self.player1),
+                                    player2_name=self.db.get_name(self.player2),
+                                ),
+                                "image/jpeg",
                             ),
-                            "image/jpeg",
+                            caption="\n".join(new_text),
                         ),
-                        caption="\n".join(new_text),
+                        reply_markup=self._keyboard(
+                            cast(list[_CallbackDataInput], pieces),
+                            expected_uid=player.id,
+                        ),
                     ),
-                    reply_markup=self._keyboard(cast(list[_CallbackDataInput], pieces), expected_uid=player.id),
-                ))
+                )
 
             elif command == "MOVE":
                 self.init_turn(move=core.Move.from_pgn(args[0], self.cur_board))
@@ -766,8 +826,8 @@ class PMMatch(BaseMatch):
             },
         )
 
-    @property   # type: ignore
-    def player_msg(self) -> Optional[Message]:   # type: ignore
+    @property  # type: ignore
+    def player_msg(self) -> Optional[Message]:  # type: ignore
         return self.msg1 if len(self.moves) % 2 == 0 else self.msg2
 
     @player_msg.setter
@@ -777,8 +837,8 @@ class PMMatch(BaseMatch):
         else:
             self.msg2 = msg
 
-    @property     # type: ignore
-    def opponent_msg(self) -> Optional[Message]:    # type: ignore
+    @property  # type: ignore
+    def opponent_msg(self) -> Optional[Message]:  # type: ignore
         return self.msg2 if len(self.moves) % 2 == 0 else self.msg1
 
     @opponent_msg.setter
@@ -789,7 +849,9 @@ class PMMatch(BaseMatch):
             self.msg1 = msg
 
     @classmethod
-    def _from_cgn(cls, obj: parsers.MatchData, dispatcher: Dispatcher, id: str) -> "PMMatch":
+    def _from_cgn(
+        cls, obj: parsers.MatchData, dispatcher: Dispatcher, id: str
+    ) -> "PMMatch":
         date = datetime.datetime.strptime(cast(str, obj["date"]), utils.DATE_FORMAT)
 
         res = cls(
@@ -848,9 +910,7 @@ class PMMatch(BaseMatch):
             self.init_msg_text = player_langtable["curr-move"].format(
                 n=self.cur_board.turn
             )
-            opponent_msg = opponent_langtable["curr-move"].format(
-                n=self.cur_board.turn
-            )
+            opponent_msg = opponent_langtable["curr-move"].format(n=self.cur_board.turn)
 
             self.init_msg_text += "\n"
             opponent_msg += "\n"
@@ -867,13 +927,19 @@ class PMMatch(BaseMatch):
                 self.init_msg_text += "\n" + player_langtable["player-to-accept-draw"]
                 keyboard = [
                     {"text": player_langtable["decline-button"], "data": ["TURN"]},
-                    {"text": player_langtable["accept-button"], "data": ["ACCEPT_DRAW"]}
+                    {
+                        "text": player_langtable["accept-button"],
+                        "data": ["ACCEPT_DRAW"],
+                    },
                 ]
             else:
                 self.init_msg_text += "\n" + player_langtable["player-to-move"]
 
                 keyboard = [
-                    {"text": player_langtable["other-actions-button"], "data": ["OTHER"]}
+                    {
+                        "text": player_langtable["other-actions-button"],
+                        "data": ["OTHER"],
+                    }
                 ]
                 for piece in self.pieces[0]:
                     if piece.get_moves():
@@ -895,23 +961,31 @@ class PMMatch(BaseMatch):
                 player2_name=self.db.get_name(self.player2),
             )
             if self.player_msg:
-                self.player_msg = cast(Message, self.player_msg.edit_media(
-                    media=InputMediaPhoto(
-                        base.get_tempfile_url(img, "image/jpeg"),
-                        caption=self.init_msg_text,
+                self.player_msg = cast(
+                    Message,
+                    self.player_msg.edit_media(
+                        media=InputMediaPhoto(
+                            base.get_temp_url(img, "image/jpeg"),
+                            caption=self.init_msg_text,
+                        ),
+                        reply_markup=self._keyboard(
+                            cast(list[_CallbackDataInput], keyboard),
+                            expected_uid=player.id,
+                            head_item=True,
+                        ),
                     ),
-                    reply_markup=self._keyboard(
-                        cast(list[_CallbackDataInput], keyboard), expected_uid=player.id, head_item=True
-                    ),
-                ))
+                )
 
             if self.opponent_msg:
-                self.opponent_msg = cast(Message, self.opponent_msg.edit_media(
-                    media=InputMediaPhoto(
-                        base.get_tempfile_url(img, "image/jpeg"),
-                        caption=opponent_msg,
-                    )
-                ))
+                self.opponent_msg = cast(
+                    Message,
+                    self.opponent_msg.edit_media(
+                        media=InputMediaPhoto(
+                            base.get_temp_url(img, "image/jpeg"),
+                            caption=opponent_msg,
+                        )
+                    ),
+                )
 
     def handle_input(self, command: str, args: list[str]) -> Optional[tuple[str, bool]]:
         try:
@@ -921,30 +995,33 @@ class PMMatch(BaseMatch):
             if command == "OTHER":
                 new_text = self.init_msg_text.split("\n")
                 new_text[-1] = langtable["player-to-choose-action"]
-                self.player_msg = cast(Message, cast(Message, self.player_msg).edit_caption(
-                    caption="\n".join(new_text),
-                    reply_markup=self._keyboard(
-                        [
-                            {"text": langtable["back-button"], "data": ["TURN"]},
-                            {
-                                "text": langtable["resign-button"],
-                                "data": ["RESIGN"],
-                            },
-                            {
-                                "text": langtable["draw-offer-button"],
-                                "data": ["OFFER_DRAW"],
-                            },
-                        ],
-                        expected_uid=player.id,
-                        head_item=True
+                self.player_msg = cast(
+                    Message,
+                    cast(Message, self.player_msg).edit_caption(
+                        caption="\n".join(new_text),
+                        reply_markup=self._keyboard(
+                            [
+                                {"text": langtable["back-button"], "data": ["TURN"]},
+                                {
+                                    "text": langtable["resign-button"],
+                                    "data": ["RESIGN"],
+                                },
+                                {
+                                    "text": langtable["draw-offer-button"],
+                                    "data": ["OFFER_DRAW"],
+                                },
+                            ],
+                            expected_uid=player.id,
+                            head_item=True,
+                        ),
                     ),
-                ))
+                )
 
             if command == "TURN":
                 if self.draw_offered:
-                        init_msg_text = self.init_msg_text.split("\n")
-                        init_msg_text[-1] = langtable["player-to-move"]
-                        self.init_msg_text = "\n".join(init_msg_text)
+                    init_msg_text = self.init_msg_text.split("\n")
+                    init_msg_text[-1] = langtable["player-to-move"]
+                    self.init_msg_text = "\n".join(init_msg_text)
                 piece_buttons = [
                     {"text": langtable["other-actions-button"], "data": ["OTHER"]}
                 ]
@@ -961,24 +1038,29 @@ class PMMatch(BaseMatch):
                             }
                         )
 
-                self.player_msg = cast(Message, cast(Message, self.player_msg).edit_media(
-                    media=InputMediaPhoto(
-                        base.get_tempfile_url(
-                            media.board_image(
-                                player.language_code,
-                                moves=self.moves,
-                                startpos=self.startpos,
-                                player1_name=self.db.get_name(self.player1),
-                                player2_name=self.db.get_name(self.player2),
+                self.player_msg = cast(
+                    Message,
+                    cast(Message, self.player_msg).edit_media(
+                        media=InputMediaPhoto(
+                            base.get_temp_url(
+                                media.board_image(
+                                    player.language_code,
+                                    moves=self.moves,
+                                    startpos=self.startpos,
+                                    player1_name=self.db.get_name(self.player1),
+                                    player2_name=self.db.get_name(self.player2),
+                                ),
+                                "image/jpeg",
                             ),
-                            "image/jpeg",
+                            caption=self.init_msg_text,
                         ),
-                        caption=self.init_msg_text,
+                        reply_markup=self._keyboard(
+                            cast(list[_CallbackDataInput], piece_buttons),
+                            expected_uid=player.id,
+                            head_item=True,
+                        ),
                     ),
-                    reply_markup=self._keyboard(
-                        cast(list[_CallbackDataInput], piece_buttons), expected_uid=player.id, head_item=True
-                    ),
-                ))
+                )
 
             elif command == "RESIGN":
                 self.state = (
@@ -1025,31 +1107,38 @@ class PMMatch(BaseMatch):
                 new_text = self.init_msg_text.split("\n")
                 new_text[-1] = langtable["player-to-choose-dest"]
 
-                self.player_msg = cast(Message, cast(Message, self.player_msg).edit_media(
-                    media=InputMediaPhoto(
-                        base.get_tempfile_url(
-                            media.board_image(
-                                player.language_code,
-                                moves=self.moves,
-                                startpos=self.startpos,
-                                selected=pos,
-                                possible_moves=moves,
-                                player1_name=self.db.get_name(self.player1),
-                                player2_name=self.db.get_name(self.player2),
+                self.player_msg = cast(
+                    Message,
+                    cast(Message, self.player_msg).edit_media(
+                        media=InputMediaPhoto(
+                            base.get_temp_url(
+                                media.board_image(
+                                    player.language_code,
+                                    moves=self.moves,
+                                    startpos=self.startpos,
+                                    selected=pos,
+                                    possible_moves=moves,
+                                    player1_name=self.db.get_name(self.player1),
+                                    player2_name=self.db.get_name(self.player2),
+                                ),
+                                "image/jpeg",
                             ),
-                            "image/jpeg",
+                            caption="\n".join(new_text),
                         ),
-                        caption="\n".join(new_text),
+                        reply_markup=self._keyboard(
+                            cast(list[_CallbackDataInput], dest_buttons),
+                            expected_uid=player.id,
+                            head_item=True,
+                        ),
                     ),
-                    reply_markup=self._keyboard(
-                        cast(list[_CallbackDataInput], dest_buttons), expected_uid=player.id, head_item=True
-                    ),
-                ))
+                )
 
             elif command == "PROMOTION_MENU":
                 src = utils.BoardPoint(args[0])
                 dst = utils.BoardPoint(args[1])
-                move = core.Move.from_piece(self.cur_board[src], dst, new_piece=core.Queen)
+                move = core.Move.from_piece(
+                    self.cur_board[src], dst, new_piece=core.Queen
+                )
                 pieces = [
                     {
                         "text": langtable["queen"],
@@ -1072,24 +1161,30 @@ class PMMatch(BaseMatch):
                 new_text = self.init_msg_text.split("\n")
                 new_text[-1] = langtable["player-to-promote"]
 
-                self.player_msg = cast(Message, cast(Message, self.player_msg).edit_media(
-                    media=InputMediaPhoto(
-                        base.get_tempfile_url(
-                            media.board_image(
-                                player.language_code,
-                                moves=self.moves,
-                                startpos=self.startpos,
-                                selected=src,
-                                possible_moves=[move],
-                                player1_name=self.db.get_name(self.player1),
-                                player2_name=self.db.get_name(self.player2),
+                self.player_msg = cast(
+                    Message,
+                    cast(Message, self.player_msg).edit_media(
+                        media=InputMediaPhoto(
+                            base.get_temp_url(
+                                media.board_image(
+                                    player.language_code,
+                                    moves=self.moves,
+                                    startpos=self.startpos,
+                                    selected=src,
+                                    possible_moves=[move],
+                                    player1_name=self.db.get_name(self.player1),
+                                    player2_name=self.db.get_name(self.player2),
+                                ),
+                                "image/jpeg",
                             ),
-                            "image/jpeg",
+                            caption="\n".join(new_text),
                         ),
-                        caption="\n".join(new_text),
+                        reply_markup=self._keyboard(
+                            cast(list[_CallbackDataInput], pieces),
+                            expected_uid=player.id,
+                        ),
                     ),
-                    reply_markup=self._keyboard(cast(list[_CallbackDataInput], pieces), expected_uid=player.id),
-                ))
+                )
 
             elif command == "MOVE":
                 return self.init_turn(move=core.Move.from_pgn(args[0], self.cur_board))
@@ -1107,7 +1202,6 @@ class PMMatch(BaseMatch):
                 )
 
         return None
-
 
 
 class AIMatch(PMMatch):
@@ -1135,4 +1229,3 @@ class AIMatch(PMMatch):
         else:
             super().init_turn(move=move)
             return super().init_turn(self.engine.get_move(self.cur_board))
-

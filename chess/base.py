@@ -1,6 +1,16 @@
 import os
 import json
-from typing import Any, Callable, Iterator, Optional, TypedDict, cast, Generator
+from typing import (
+    Any,
+    Callable,
+    Iterator,
+    Optional,
+    TypedDict,
+    Union,
+    cast,
+    Generator,
+    overload,
+)
 import uuid
 import mimetypes
 import pickle
@@ -12,9 +22,12 @@ import redis
 
 TextCommand = Callable[[Update, "BoardGameContext"], None]
 KeyboardCommand = Callable[[Update, "BoardGameContext", list[str]], None]
-_UserData = TypedDict("_UserData", {"is_anon": bool, "lang_code": str, "total": int, "wins": int})
+_UserData = TypedDict(
+    "_UserData", {"is_anon": bool, "lang_code": str, "total": int, "wins": int}
+)
 database: "RedisInterface"
 dispatcher: Dispatcher
+
 
 class RedisInterface(redis.Redis):
     bot: Bot
@@ -28,7 +41,7 @@ class RedisInterface(redis.Redis):
 
     def _flush_matches(self, matches: dict[str, object]) -> None:
         for id, matchobj in matches.items():
-            self.set(f"match:{id}", bytes(matchobj))    # type: ignore
+            self.set(f"match:{id}", bytes(matchobj))  # type: ignore
 
     def get_pending_message(
         self, pmid: str
@@ -60,12 +73,8 @@ class RedisInterface(redis.Redis):
         Returns: `str` - the resulting link."""
         pmsg_id = create_match_id(n=16)
 
-        self.set(
-            f"pm:{pmsg_id}:f", pickle.dumps((callback, args)), ex=timeout
-        )
-        self.set(
-            f"pm:{pmsg_id}:is-single", str(int(is_single)).encode(), ex=timeout
-        )
+        self.set(f"pm:{pmsg_id}:f", pickle.dumps((callback, args)), ex=timeout)
+        self.set(f"pm:{pmsg_id}:is-single", str(int(is_single)).encode(), ex=timeout)
 
         return helpers.create_deep_linked_url(self.bot.username, "pmid" + pmsg_id)
 
@@ -235,7 +244,9 @@ class MenuFormatter:
         lookup_list = [value.value for value in self[key]]
         return lookup_list.index(value)
 
-    def format_notes(self, context: "BoardGameContext", options: dict[str, Optional[str]] = None):
+    def format_notes(
+        self, context: "BoardGameContext", options: dict[str, Optional[str]] = None
+    ):
         options = options or self.defaults
         notes = []
         if options["mode"] == "online":
@@ -254,7 +265,9 @@ class MenuFormatter:
 
         return "\n".join(notes)
 
-    def get_default_value(self, name: str, options: dict[str, Optional[str]]) -> Optional[str]:
+    def get_default_value(
+        self, name: str, options: dict[str, Optional[str]]
+    ) -> Optional[str]:
         try:
             return self[name].available_values(options)[0]
         except LookupError:
@@ -298,30 +311,43 @@ class MenuFormatter:
                     [
                         InlineKeyboardButton(
                             text="◀️",
-                            callback_data=str(CallbackData(
-                                "PREV",
-                                args=[option.name],
-                                expected_uid=user.id,
-                                handler_id="MAIN",
-                            )),
+                            callback_data=str(
+                                CallbackData(
+                                    "PREV",
+                                    args=[option.name],
+                                    expected_uid=user.id,
+                                    handler_id="MAIN",
+                                )
+                            ),
                         ),
                         InlineKeyboardButton(
                             text=langtable[user.language_code][chosen],
-                            callback_data=str(CallbackData(
-                                "DESC",
-                                args=[option.name, str(self.get_index(option.name, cast(str, chosen)))],
-                                handler_id="MAIN",
-                                expected_uid=user.id,
-                            )),
+                            callback_data=str(
+                                CallbackData(
+                                    "DESC",
+                                    args=[
+                                        option.name,
+                                        str(
+                                            self.get_index(
+                                                option.name, cast(str, chosen)
+                                            )
+                                        ),
+                                    ],
+                                    handler_id="MAIN",
+                                    expected_uid=user.id,
+                                )
+                            ),
                         ),
                         InlineKeyboardButton(
                             text="▶️",
-                            callback_data=str(CallbackData(
-                                "NEXT",
-                                args=[option.name],
-                                handler_id="MAIN",
-                                expected_uid=user.id,
-                            )),
+                            callback_data=str(
+                                CallbackData(
+                                    "NEXT",
+                                    args=[option.name],
+                                    handler_id="MAIN",
+                                    expected_uid=user.id,
+                                )
+                            ),
                         ),
                     ]
                 )
@@ -335,18 +361,20 @@ class MenuFormatter:
             [
                 InlineKeyboardButton(
                     text=langtable[user.language_code]["main:cancel-button"],
-                    callback_data=str(CallbackData(
-                        "REMOVE_MENU", handler_id="MAIN", expected_uid=user.id
-                    )),
+                    callback_data=str(
+                        CallbackData(
+                            "REMOVE_MENU", handler_id="MAIN", expected_uid=user.id
+                        )
+                    ),
                 ),
                 InlineKeyboardButton(
                     text=langtable[user.language_code]["main:play-button"],
                     switch_inline_query=inline_query,
                     callback_data=None
                     if inline_query is not None
-                    else str(CallbackData(
-                        "PLAY", handler_id="MAIN", expected_uid=user.id
-                    )),
+                    else str(
+                        CallbackData("PLAY", handler_id="MAIN", expected_uid=user.id)
+                    ),
                 ),
             ]
         )
@@ -359,19 +387,37 @@ class MenuFormatter:
         return "\n".join(
             [
                 locale["main:options-title"],
-                ", ".join([locale[v] for k, v in options.items() if k != "mode" and v is not None]),
+                ", ".join(
+                    [
+                        locale[v]
+                        for k, v in options.items()
+                        if k != "mode" and v is not None
+                    ]
+                ),
             ]
         )
 
     def tg_encode(self, indexes: dict[str, Optional[str]]) -> str:
-        return "&".join(["=".join((k, v)) for k, v in indexes.items() if k != "mode" and v is not None])
+        return "&".join(
+            [
+                "=".join((k, v))
+                for k, v in indexes.items()
+                if k != "mode" and v is not None
+            ]
+        )
 
     def tg_decode(self, src: str) -> dict[str, Optional[str]]:
-        indexes: dict[str, Optional[str]] = dict(cast(tuple[str, str], token.split("=")) for token in src.split("&") if "=" in token)
+        indexes: dict[str, Optional[str]] = dict(
+            cast(tuple[str, str], token.split("="))
+            for token in src.split("&")
+            if "=" in token
+        )
         for option in self:
             is_available = option.is_available(indexes)
             if option.name not in indexes and is_available:
-                indexes[option.name] = cast(str, self.get_default_value(option.name, indexes))
+                indexes[option.name] = cast(
+                    str, self.get_default_value(option.name, indexes)
+                )
             elif option.name in indexes and not is_available:
                 del indexes[option.name]
 
@@ -387,9 +433,7 @@ class BoardGameContext(CallbackContext):
         RedisInterface.bot = self.dispatcher.bot
 
     @classmethod
-    def from_update(
-        cls, update: object, dispatcher: Dispatcher
-    ) -> "BoardGameContext":
+    def from_update(cls, update: object, dispatcher: Dispatcher) -> "BoardGameContext":
         self = super().from_update(update, dispatcher)
         if isinstance(update, Update) and isinstance(update.effective_user, User):
             self.langtable = langtable[update.effective_user.language_code]
@@ -411,19 +455,27 @@ class CallbackData:
     command: str
     args: list[str]
 
-    def __init__(self, command: str, expected_uid: Optional[int] = None, handler_id: str = "MAIN", args: list[str] = []):
+    def __init__(
+        self,
+        command: str,
+        expected_uid: Optional[int] = None,
+        handler_id: str = "MAIN",
+        args: list[str] = [],
+    ):
         self.command = command
         self.expected_uid = expected_uid
         self.handler_id = handler_id
         self.args = args
 
     def __str__(self):
-        return "\n".join([
-            str(self.expected_uid) if self.expected_uid is not None else "",
-            self.handler_id,
-            self.command,
-            "#".join(self.args)
-        ])
+        return "\n".join(
+            [
+                str(self.expected_uid) if self.expected_uid is not None else "",
+                self.handler_id,
+                self.command,
+                "#".join(self.args),
+            ]
+        )
 
     @classmethod
     def decode(cls, src: str) -> "CallbackData":
@@ -432,7 +484,7 @@ class CallbackData:
             expected_uid=int(data[0]) if data[0] else None,
             handler_id=data[1],
             command=data[2],
-            args=data[3].split("#") if data[3] else []
+            args=data[3].split("#") if data[3] else [],
         )
 
         return res
@@ -489,33 +541,37 @@ def get_database() -> RedisInterface:
     return database
 
 
-def get_tempfile_url(data: bytes, mimetype: str) -> str:
+@overload
+def get_temp_url(filename: str) -> str:
+    ...
+
+
+@overload
+def get_temp_url(data: bytes, mimetype: str) -> str:
+    ...
+
+
+def get_temp_url(src, *args):
     """
     Caches `data` in a file of type specified in `mimetype`, to the images/temp folder and returns a link to the data.
     The generated URL is used only once, after it is accessed, the data is deleted from the machine.
     Argument:
-        data: `bytes` - The data to be returned upon accessing the URL.
-        mimetype: `str` - The type of data. Supported types are defined by `mimetypes` built-in module.
+        data: `bytes` | `str` - If it's type is bytes, it's the data needed to be cached; if it's type is str, it's a path to a file in `images/static`
+        mimetype: `str` - The type of data. Supported types are defined by `mimetypes` built-in module. Only needs to be provided for creating files from data in RAM.
     Returns: `str` - URL to the data.
     """
-    extension = mimetypes.guess_extension(mimetype)
-    assert extension is not None, f"Unknown file format: {mimetype}"
-    filename = "".join(["temp", uuid.uuid4().hex, extension])
+    if isinstance(src, bytes):
+        extension = mimetypes.guess_extension(args[0])
+        assert extension is not None, f"Unknown file format: {args[0]}"
+        data = src
+    elif isinstance(src, str):
+        extension = "." + src.split(".", maxsplit=1)[1]
+        src = os.path.join("images", "static", src)
+        data = open(src, "rb").read()
+    filename = uuid.uuid4().hex + extension
     open(os.path.join("images", "temp", filename), "wb").write(data)
     return "/".join(
         [os.environ["HOST_URL"], os.environ["BOT_TOKEN"], "dynamic", filename]
-    )
-
-
-def get_file_url(filename: str) -> str:
-    """
-    Creates a link to the file located in the server's images/static folder.
-    Argument:
-        filename: `str` - Name of the file.
-    Returns: `str` - A link to the file.
-    """
-    return "/".join(
-        [os.environ["HOST_URL"], os.environ["BOT_TOKEN"], "static", filename]
     )
 
 
@@ -544,14 +600,14 @@ def set_result(match_id, results: dict[User, bool]) -> None:
     Return value: None
     """
     for user, is_winner in results.items():
-        total_games = int(database.get(f"{user.id}:total") or 0)    # type: ignore
-        database.set(f"{user.id}:total", str(total_games + 1).encode())    # type: ignore
+        total_games = int(database.get(f"{user.id}:total") or 0)  # type: ignore
+        database.set(f"{user.id}:total", str(total_games + 1).encode())  # type: ignore
         if is_winner:
-            total_wins = int(database.get(f"{user.id}:wins") or 0)   # type: ignore
-            database.set(f"{user.id}:wins", str(total_wins + 1).encode())    # type: ignore
+            total_wins = int(database.get(f"{user.id}:wins") or 0)  # type: ignore
+            database.set(f"{user.id}:wins", str(total_wins + 1).encode())  # type: ignore
 
     del dispatcher.bot_data["matches"][match_id]
-    database.delete(f"match:{match_id}")    # type: ignore
+    database.delete(f"match:{match_id}")  # type: ignore
 
 
 langtable_cls = lambda obj: DefaultTable(obj, def_f=lambda _, k: k)

@@ -33,12 +33,13 @@ def init(is_debug: bool):
 
 def test_match(update: Update, context: BoardGameContext):
     if context.args:
-        assert update.effective_message and update.effective_user and update.effective_chat
+        assert (
+            update.effective_message and update.effective_user and update.effective_chat
+        )
         options = context.menu.defaults
         options["pos"] = " ".join(context.args[:-1])
         msg = update.effective_chat.send_photo(
-            get_file_url(INVITE_IMAGE),
-            caption=context.langtable["main:starting-match"]
+            get_temp_url(INVITE_IMAGE), caption=context.langtable["main:starting-match"]
         )
         msg2 = None
         if context.args[-1] == "group":
@@ -52,8 +53,8 @@ def test_match(update: Update, context: BoardGameContext):
             context.bot_data["matches"][new.id] = new
         elif context.args[-1] == "pm":
             msg2 = update.effective_chat.send_photo(
-                get_file_url(INVITE_IMAGE),
-                context.langtable["main:starting-match"]
+                get_temp_url(INVITE_IMAGE),
+                context.langtable["main:starting-match"],
             )
             new = PMMatch(
                 update.effective_user,
@@ -61,7 +62,7 @@ def test_match(update: Update, context: BoardGameContext):
                 msg,
                 msg2,
                 dispatcher=context.dispatcher,
-                options=options
+                options=options,
             )
         else:
             new = AIMatch(
@@ -70,7 +71,7 @@ def test_match(update: Update, context: BoardGameContext):
                 msg,
                 msg2,
                 dispatcher=context.dispatcher,
-                options=options
+                options=options,
             )
         try:
             new.init_turn()
@@ -80,9 +81,7 @@ def test_match(update: Update, context: BoardGameContext):
                 context.langtable["main:init-error"],
             )
             if msg2 is not None:
-                msg2.edit_caption(
-                    context.langtable["main:init-error"]
-                )
+                msg2.edit_caption(context.langtable["main:init-error"])
             context.dispatcher.dispatch_error(update, exc)
 
 

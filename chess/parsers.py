@@ -12,7 +12,7 @@ MatchData = TypedDict(
         "black_name": str,
         "result": GameState,
         "date": Optional[str],
-        "moves": list[Move]
+        "moves": list[Move],
     },
 )
 
@@ -116,12 +116,12 @@ class PGNParser:
             _moves, startpos=BoardInfo.from_fen(_res.get("FEN", STARTPOS))
         )
         res = MatchData(
-            white_name=_res["White"], 
-            black_name=_res["black"], 
+            white_name=_res["White"],
+            black_name=_res["black"],
             date=_res["date"],
             moves=moves,
             result=result,
-            headers=_res
+            headers=_res,
         )
 
         for key in ["FEN", "Result", "Date", "White", "Black"]:
@@ -189,19 +189,19 @@ class CGNParser:
 
     @classmethod
     def decode(cls, src: bytes) -> MatchData:
-        data: dict[bytes, bytes] = dict(cast(tuple[bytes, bytes], x.split(b"\t")) for x in src.splitlines())
+        data: dict[bytes, bytes] = dict(
+            cast(tuple[bytes, bytes], x.split(b"\t")) for x in src.splitlines()
+        )
         res = MatchData(
             white_name=data[b"W"].decode(),
             black_name=data[b"B"].decode(),
             date=data[b"D"].decode() if b"D" in data else None,
             result=_reversed(cls.RESULT_CODES)[data.get(b"R", b"*")],
             moves=[],
-            headers={}
+            headers={},
         )
 
-        last_pos = BoardInfo.from_fen(
-            data.get(b"S", STARTPOS.encode()).decode()
-        )
+        last_pos = BoardInfo.from_fen(data.get(b"S", STARTPOS.encode()).decode())
         for move in zip(data[b"M"][::2], data[b"M"][1::2]):
             res["moves"].append(
                 Move.from_hash(
@@ -232,7 +232,7 @@ class CGNParser:
             b"W": (white_name or "?").encode(),
             b"B": (black_name or "?").encode(),
             b"R": cls.RESULT_CODES[result],
-            b"D": (date or "?").encode()
+            b"D": (date or "?").encode(),
         }
         res.update({k.encode(): cls.escape(v).encode() for k, v in headers.items()})
 

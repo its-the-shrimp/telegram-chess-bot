@@ -244,8 +244,8 @@ def send_invite_inline(update: tg.Update, context: core.BoardGameContext) -> Non
         results=(
             tg.InlineQueryResultPhoto(
                 match_id,
-                core.get_file_url(core.INVITE_IMAGE),
-                core.get_file_url(core.INVITE_IMAGE),
+                core.get_temp_url(core.INVITE_IMAGE),
+                core.get_temp_url(core.INVITE_IMAGE),
                 title=context.langtable["main:send-challenge"],
                 description=challenge_desc,
                 caption=context.langtable["main:invite-msg"].format(
@@ -358,9 +358,12 @@ def anon_mode_on(update: tg.Update, context: core.BoardGameContext, args: list[s
 @keyboard_command
 def prev(update: tg.Update, context: core.BoardGameContext, args: list[str]):
     assert update.effective_message and update.effective_user and update.callback_query
-    options = cast(dict[str, Optional[str]], context.menu.decode(
-        cast(tg.InlineKeyboardMarkup, update.effective_message.reply_markup)
-    ))
+    options = cast(
+        dict[str, Optional[str]],
+        context.menu.decode(
+            cast(tg.InlineKeyboardMarkup, update.effective_message.reply_markup)
+        ),
+    )
     key = args[0]
 
     values = context.menu[key].available_values(options)
@@ -368,7 +371,7 @@ def prev(update: tg.Update, context: core.BoardGameContext, args: list[str]):
     for value in values_iter:
         if value == options[key]:
             try:
-                options[key] = __builtins__["next"](values_iter)    # type: ignore
+                options[key] = __builtins__["next"](values_iter)  # type: ignore
             except StopIteration:
                 options[key] = values[-1]
             break
@@ -386,9 +389,12 @@ def prev(update: tg.Update, context: core.BoardGameContext, args: list[str]):
 @keyboard_command
 def next(update: tg.Update, context: core.BoardGameContext, args: list[str]):
     assert update.effective_message and update.effective_user and update.callback_query
-    options = cast(dict[str, Optional[str]], context.menu.decode(
-        cast(tg.InlineKeyboardMarkup, update.effective_message.reply_markup)
-    ))
+    options = cast(
+        dict[str, Optional[str]],
+        context.menu.decode(
+            cast(tg.InlineKeyboardMarkup, update.effective_message.reply_markup)
+        ),
+    )
     key = args[0]
 
     values = context.menu[key].available_values(options)
@@ -396,7 +402,7 @@ def next(update: tg.Update, context: core.BoardGameContext, args: list[str]):
     for value in values_iter:
         if value == options[key]:
             try:
-                options[key] = __builtins__["next"](values_iter)   # type: ignore
+                options[key] = __builtins__["next"](values_iter)  # type: ignore
             except StopIteration:
                 options[key] = values[0]
             break
@@ -475,7 +481,8 @@ def play(update: tg.Update, context: core.BoardGameContext, args: list[str]):
     if options["mode"] == "vsbot":
         update.effective_message.edit_text(context.langtable["main:match-found"])
         new_msg = update.effective_chat.send_photo(
-            core.get_file_url(core.INVITE_IMAGE), caption=context.langtable["main:starting-match"]
+            core.get_temp_url(core.INVITE_IMAGE),
+            caption=context.langtable["main:starting-match"],
         )
         new: core.BaseMatch = core.AIMatch(
             update.effective_user,
@@ -493,7 +500,7 @@ def play(update: tg.Update, context: core.BoardGameContext, args: list[str]):
             if hasattr(core, "ERROR_IMAGE"):
                 new_msg.edit_media(
                     media=tg.InputMediaPhoto(
-                        core.get_file_url(core.ERROR_IMAGE),   # type: ignore
+                        core.get_temp_url(core.ERROR_IMAGE),  # type: ignore
                         caption=context.langtable["main:init-error"],
                     )
                 )
@@ -519,20 +526,24 @@ def play(update: tg.Update, context: core.BoardGameContext, args: list[str]):
                             [
                                 tg.InlineKeyboardButton(
                                     text=context.langtable["main:continue-button"],
-                                    callback_data=str(core.CallbackData(
-                                        "PLAY",
-                                        args=["1"],
-                                        handler_id="MAIN",
-                                        expected_uid=update.effective_user.id,
-                                    )),
+                                    callback_data=str(
+                                        core.CallbackData(
+                                            "PLAY",
+                                            args=["1"],
+                                            handler_id="MAIN",
+                                            expected_uid=update.effective_user.id,
+                                        )
+                                    ),
                                 ),
                                 tg.InlineKeyboardButton(
                                     text=context.langtable["main:cancel-button"],
-                                    callback_data=str(core.CallbackData(
-                                        "RESTOREMENU",
-                                        handler_id="MAIN",
-                                        expected_uid=update.effective_user.id,
-                                    )),
+                                    callback_data=str(
+                                        core.CallbackData(
+                                            "RESTOREMENU",
+                                            handler_id="MAIN",
+                                            expected_uid=update.effective_user.id,
+                                        )
+                                    ),
                                 ),
                             ]
                         ]
@@ -545,7 +556,7 @@ def play(update: tg.Update, context: core.BoardGameContext, args: list[str]):
                 )
                 opponent["msg"].edit_text(context.langtable["main:match-found"])
                 new_msg = update.effective_chat.send_photo(
-                    core.get_file_url(core.INVITE_IMAGE),
+                    core.get_temp_url(core.INVITE_IMAGE),
                     caption=context.langtable["main:starting-match"],
                 )
                 if opponent["chat_id"] == update.effective_chat.id:
@@ -564,7 +575,7 @@ def play(update: tg.Update, context: core.BoardGameContext, args: list[str]):
                         if hasattr(core, "ERROR_IMAGE"):
                             new_msg.edit_media(
                                 media=tg.InputMediaPhoto(
-                                    core.get_file_url(core.ERROR_IMAGE),   # type: ignore
+                                    core.get_temp_url(core.ERROR_IMAGE),  # type: ignore
                                     caption=context.langtable["main:init-error"],
                                 )
                             )
@@ -577,7 +588,7 @@ def play(update: tg.Update, context: core.BoardGameContext, args: list[str]):
                 else:
                     opponent_msg = context.bot.send_photo(
                         opponent["chat_id"],
-                        core.get_file_url(core.INVITE_IMAGE),
+                        core.get_temp_url(core.INVITE_IMAGE),
                         caption=context.langtable["main:starting-match"],
                     )
                     new = core.PMMatch(
@@ -595,7 +606,7 @@ def play(update: tg.Update, context: core.BoardGameContext, args: list[str]):
                         del context.bot_data["matches"][new.id]
                         if hasattr(core, "ERROR_IMAGE"):
                             media = tg.InputMediaPhoto(
-                                core.get_file_url(core.ERROR_IMAGE),    # type: ignore
+                                core.get_temp_url(core.ERROR_IMAGE),  # type: ignore
                                 context.langtable["main:init-error"],
                             )
                             new_msg.edit_media(media=media)
@@ -632,11 +643,13 @@ def play(update: tg.Update, context: core.BoardGameContext, args: list[str]):
                         [
                             tg.InlineKeyboardButton(
                                 text=context.langtable["main:cancel-button"],
-                                callback_data=str(core.CallbackData(
-                                    "CANCEL",
-                                    handler_id="MAIN",
-                                    expected_uid=update.effective_user.id,
-                                )),
+                                callback_data=str(
+                                    core.CallbackData(
+                                        "CANCEL",
+                                        handler_id="MAIN",
+                                        expected_uid=update.effective_user.id,
+                                    )
+                                ),
                             )
                         ]
                     ]
@@ -663,7 +676,9 @@ def cancel(update: tg.Update, context: core.BoardGameContext, args: list[str]):
 
 @keyboard_command
 def remove_menu(update: tg.Update, context: core.BoardGameContext, args: list[str]):
-    cast(tg.Message, update.effective_message).edit_text(context.langtable["main:search-cancelled"])
+    cast(tg.Message, update.effective_message).edit_text(
+        context.langtable["main:search-cancelled"]
+    )
 
 
 @keyboard_command
@@ -702,10 +717,7 @@ def button_callback(update: tg.Update, context: core.BoardGameContext):
     assert update.callback_query
     args = core.CallbackData.decode(cast(str, update.callback_query.data))
     logging.debug(f"Handling user input: {args}")
-    if (
-        args.expected_uid
-        and args.expected_uid != update.callback_query.from_user.id
-    ):
+    if args.expected_uid and args.expected_uid != update.callback_query.from_user.id:
         update.callback_query.answer(
             text=context.langtable["main:unexpected-uid"],
             show_alert=True,
@@ -771,9 +783,9 @@ def create_app() -> TelegramBotApp:
     )
     app = TelegramBotApp(__name__)
     app.dispatcher = dispatcher
-    conn = cast(core.RedisInterface, core.RedisInterface.from_url(
-        os.environ["REDISCLOUD_URL"]
-    ))
+    conn = cast(
+        core.RedisInterface, core.RedisInterface.from_url(os.environ["REDISCLOUD_URL"])
+    )
     dispatcher.bot_data.update(
         {
             "matches": {},
@@ -796,7 +808,7 @@ def create_app() -> TelegramBotApp:
 
     if hasattr(core, "TEXT_COMMANDS"):
         for cmd, f in core.TEXT_COMMANDS.items():
-            tg_handlers.insert(0, CommandHandler(cmd, f))
+            dispatcher.add_handler(CommandHandler(cmd, f))
 
     if hasattr(core, "KEYBOARD_COMMANDS"):
         tg_keyboard_commands.update(core.KEYBOARD_COMMANDS)
@@ -829,7 +841,9 @@ if __name__ == "__main__":
     elif sys.argv[1] == "db":
         print("Connecting to database...")
         env = json.load(open("debug_env.json"))
-        conn = cast(core.RedisInterface, core.RedisInterface.from_url(env["REDISCLOUD_URL"]))
+        conn = cast(
+            core.RedisInterface, core.RedisInterface.from_url(env["REDISCLOUD_URL"])
+        )
 
         os.system("clear")
         print(
