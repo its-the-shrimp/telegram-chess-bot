@@ -123,12 +123,13 @@ class BasePiece:
                         continue
 
                 move = BoardPoint(*[i + d for i, d in zip(pos, diff)])
+
                 if move in allies_pos and not all:
                     break
                 elif (
                     cls == Pawn
                     and diff[0] != 0
-                    and getattr(board[move], "is_white", is_white) == is_white
+                    and getattr(board[move], "is_white", (not is_white if reverse else is_white)) == (not is_white if reverse else is_white)
                     and board.enpassant_pos[1] != move
                     and not (reverse and pos == board.enpassant_pos[1])
                 ):

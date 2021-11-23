@@ -23,7 +23,7 @@
         "mode": "Opponent",
         "timectrl": "Time control",
         "vsbot:note": "Note that games against the bot are not counted in the /stats .",
-        "invite:note": "To send an invite:\n\t1. Click 'Play' button;\n\t2. Choose the chat to send the invite to; 3.\n\tClick on the first image that appears above the input bar.",
+        "invite:note": "To send an invite:\n\t1. Click 'Play' button;\n\t2. Choose the chat to send the invite to;\n\t3.Click on the first image that appears above the input bar.",
         "custom-pos:desc": "Start the game from a custom-defined position. Follow the steps above to start a game with a custom position.",
         "std-chess:desc": "Chess with standard rules.",
         "chess960:desc": "Chess960 is a chess variant in which pieces on the furthermost rows are shuffled symmetrically for each side.",
