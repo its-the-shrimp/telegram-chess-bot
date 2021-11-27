@@ -5,7 +5,7 @@ import numpy
 import os
 from .core import BoardInfo, GameState, King, Move, MoveEval
 from .parsers import PGNParser
-from .utils import BoardPoint
+from .utils import STARTPOS, BoardPoint
 from .base import create_match_id, langtable
 
 
@@ -33,6 +33,7 @@ SMALL_FONT = LARGE_FONT.font_variant(size=20)
 
 
 BOARD = Image.open("images/static/board.png")
+FLIPPED_BOARD = Image.open("images/static/flipped-board.png")
 BOARD_OFFSET = (16, 100)
 TILE_SIZE = 60
 
@@ -66,51 +67,68 @@ INCOMING_POINTER = Image.fromarray(_INCOMING_POINTER)
 del _POINTER, _INCOMING_POINTER
 
 
-def _imagepos(pos: BoardPoint, width: int, height: int) -> tuple[int, int]:
+def _imagepos(
+    pos: BoardPoint, width: int, height: int, flip: bool = False
+) -> tuple[int, int]:
     return (
-        BOARD_OFFSET[0] + TILE_SIZE // 2 + TILE_SIZE * pos.file - width // 2,
-        BOARD.height
-        - BOARD_OFFSET[1]
-        - TILE_SIZE // 2
-        - TILE_SIZE * pos.rank
-        - height // 2,
+        sum(
+            [
+                BOARD_OFFSET[0],
+                TILE_SIZE // 2,
+                TILE_SIZE * ((7 - pos.file) if flip else pos.file),
+                -width // 2,
+            ]
+        ),
+        sum(
+            [
+                BOARD_OFFSET[1],
+                TILE_SIZE // 2,
+                TILE_SIZE * (pos.rank if flip else (7 - pos.rank)),
+                -height // 2,
+            ]
+        ),
     )
 
 
 def _board_image(
-    lang_code: str,
+    lang_code: str = "en",
     moves: list[Move] = [],
-    startpos: BoardInfo = None,
+    startpos: BoardInfo = BoardInfo.from_fen(STARTPOS),
     selected: "BoardPoint" = None,
     result: GameState = None,
     possible_moves: list[Move] = [],
     player1_name: str = "",
     player2_name: str = "",
     custom_bg_pic: Image.Image = None,
+    flip: bool = None,
 ) -> numpy.ndarray:
-    board_img = (custom_bg_pic or BOARD).copy()
-    editor = ImageDraw.Draw(board_img)
-    lang_code = lang_code or "en"
-
     if moves:
         last_board = moves[-1].apply()
     else:
-        assert (
-            startpos is not None
-        ), "Neither `moves` nor `startpos` argument is provided."
         last_board = startpos
+    flip = flip or not last_board.is_white_turn
+    if flip:
+        player1_name, player2_name = player2_name, player1_name
+
+    board_img = (custom_bg_pic or (FLIPPED_BOARD if flip else BOARD)).copy()
+    editor = ImageDraw.Draw(board_img)
+
     for piece in last_board.board:
         piece_image = PIECES[type(piece).__name__][int(piece.is_white)]
         if piece.pos == selected:
             board_img.paste(
                 MOVETYPE_COLORS["normal"],
-                box=_imagepos(piece.pos, piece_image.width, piece_image.height),
+                box=_imagepos(
+                    piece.pos, piece_image.width, piece_image.height, flip=flip
+                ),
                 mask=piece_image,
             )
         else:
             board_img.paste(
                 piece_image,
-                box=_imagepos(piece.pos, piece_image.width, piece_image.height),
+                box=_imagepos(
+                    piece.pos, piece_image.width, piece_image.height, flip=flip
+                ),
                 mask=piece_image,
             )
 
@@ -118,7 +136,10 @@ def _board_image(
             board_img.paste(
                 MOVETYPE_COLORS["killing"],
                 box=_imagepos(
-                    piece.pos, INCOMING_POINTER.width, INCOMING_POINTER.height
+                    piece.pos,
+                    INCOMING_POINTER.width,
+                    INCOMING_POINTER.height,
+                    flip=flip,
                 ),
                 mask=INCOMING_POINTER,
             )
@@ -126,7 +147,7 @@ def _board_image(
     for new_move in possible_moves:
         board_img.paste(
             MOVETYPE_COLORS[new_move.type],
-            box=_imagepos(new_move.dst, POINTER.width, POINTER.height),
+            box=_imagepos(new_move.dst, POINTER.width, POINTER.height, flip=flip),
             mask=POINTER,
         )
 
@@ -134,7 +155,9 @@ def _board_image(
         for move in [moves[-1].src, moves[-1].dst]:
             board_img.paste(
                 MOVETYPE_COLORS["normal"],
-                box=_imagepos(move, INCOMING_POINTER.width, INCOMING_POINTER.height),
+                box=_imagepos(
+                    move, INCOMING_POINTER.width, INCOMING_POINTER.height, flip=flip
+                ),
                 mask=INCOMING_POINTER,
             )
 
@@ -300,6 +323,7 @@ def board_video(
     lang_code: str,
     player1_name: str = None,
     player2_name: str = None,
+    flip: bool = True
 ) -> tuple[bytes, bytes]:
     player1_name = player1_name or match.db.get_name(match.player1)
     player2_name = player2_name or match.db.get_name(match.player2)
@@ -307,29 +331,32 @@ def board_video(
     writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 15.0, BOARD.size)
 
     img_array = _board_image(
-        lang_code,
+        lang_code=lang_code,
         startpos=match.startpos,
         player1_name=player1_name,
         player2_name=player2_name,
+        flip=flip
     )
     for i in range(15):
         writer.write(img_array)
 
     for index in range(len(match.moves)):
         img_array = _board_image(
-            lang_code,
+            lang_code=lang_code,
             moves=match.moves[: index + 1],
             player1_name=player1_name or match.db.get_name(match.player1),
             player2_name=player2_name or match.db.get_name(match.player2),
+            flip=flip
         )
         for i in range(15):
             writer.write(img_array)
     img_array = _board_image(
-        lang_code,
+        lang_code=lang_code,
         moves=match.moves,
         result=match.state,
         player1_name=player1_name or match.db.get_name(match.player1),
         player2_name=player2_name or match.db.get_name(match.player2),
+        flip=flip
     )
     for i in range(30):
         writer.write(img_array)

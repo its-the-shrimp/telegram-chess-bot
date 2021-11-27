@@ -3,17 +3,27 @@ import random
 import functools
 from typing import Optional, Sequence, Union, TypedDict
 from .utils import BoardPoint
-from .core import Move, BoardInfo, MoveEval
+from .core import Move, BoardInfo, MoveEval, King
 
-EngineResponse = TypedDict("EngineResponse", {"moves": list[Move], "depth": int, "multipv": int, "score": "EvalScore"})
+EngineResponse = TypedDict(
+    "EngineResponse",
+    {"moves": list[Move], "depth": int, "multipv": int, "score": "EvalScore"},
+)
 
 
 def decode_engine_move(raw: str, board: BoardInfo) -> Move:
     piece = board[BoardPoint(raw[:2])]
     assert piece is not None, f"{raw}"
+    dst = BoardPoint(raw[2:4])
+    if isinstance(piece, King) and piece.pos.rank == dst.rank:
+        if piece.queenside_rook_pos and dst == (BoardPoint(2, 0 if piece.is_white else 7)):
+            return Move.from_piece(piece, dst, rook_src=piece.queenside_rook_pos)
+        elif piece.kingside_rook_pos and dst == (BoardPoint(6, 0 if piece.is_white else 7)):
+            return Move.from_piece(piece, dst, rook_src=piece.kingside_rook_pos)
+
     return Move.from_piece(
         piece,
-        BoardPoint(raw[2:4]),
+        dst,
         new_piece=BoardInfo.FENSYMBOLS[raw[4]] if len(raw) == 5 else None,
     )
 
@@ -36,7 +46,7 @@ class EvalScore:
         (-1, -1): False,
     }
 
-    def __init__(self, arg: Union[int ,float], is_white_side: bool):
+    def __init__(self, arg: Union[int, float], is_white_side: bool):
         if isinstance(arg, int):
             self.score = 0.0
             self.mate_in = arg
@@ -91,7 +101,7 @@ class ChessEngine:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        self._process.stdout.readline()   # type: ignore
+        self._process.stdout.readline()  # type: ignore
         self.default_eval_depth = default_eval_depth
         self.move_probabilities: Sequence[int] = (0,)
         self.options: dict[str, Union[str, int]] = {}
@@ -110,18 +120,26 @@ class ChessEngine:
         return self.options[key]
 
     @staticmethod
-    def _parse_response(src: str, board: BoardInfo, depth: int) -> Optional[EngineResponse]:
-        tokens = src.removeprefix("info ").replace("cp ", "cp#").replace("mate ", "mate#").split(" ")
-        _res = dict(zip(tokens[: tokens.index("pv") : 2], tokens[1 : tokens.index("pv") : 2]))
+    def _parse_response(
+        src: str, board: BoardInfo, depth: int
+    ) -> Optional[EngineResponse]:
+        src = src.removeprefix("info ")
+        src = src.replace("cp ", "cp#")
+        src = src.replace("mate ", "mate#")
+        tokens = src.split(" ")
+        _res = dict(
+            zip(tokens[: tokens.index("pv") : 2], tokens[1 : tokens.index("pv") : 2])
+        )
         eval_type, eval_score = _res["score"].split("#")
 
         res = EngineResponse(
-            depth=int(_res["depth"]), 
-            multipv=int(_res["multipv"]), 
+            depth=int(_res["depth"]),
+            multipv=int(_res["multipv"]),
             score=EvalScore(
-                int(eval_score) / 100 if eval_type == "cp" else int(eval_score), board.is_white_turn
+                int(eval_score) / 100 if eval_type == "cp" else int(eval_score),
+                board.is_white_turn,
             ),
-            moves=[]
+            moves=[],
         )
         if res["depth"] != depth:
             return None
@@ -137,7 +155,7 @@ class ChessEngine:
         return res
 
     def _input(self, cmd: str) -> None:
-        self._process.stdin.write(cmd)   # type: ignore
+        self._process.stdin.write(cmd)  # type: ignore
         # print("Process <-", repr(cmd))
 
     def set_move_probabilities(self, values: list[int]) -> None:
@@ -152,9 +170,9 @@ class ChessEngine:
         self._input(
             f"position fen {board.get_fen()}\ngo depth {depth} { ' '.join([f'{k} {v}' for k, v in kwargs.items()]) }\n"
         )
-        self._process.stdout.readline()   # type: ignore
+        self._process.stdout.readline()  # type: ignore
         results: list[EngineResponse] = []
-        for line in self._process.stdout:   # type: ignore
+        for line in self._process.stdout:  # type: ignore
             # print("Process ->", repr(line))
             if "bestmove" in line:
                 break
@@ -169,11 +187,13 @@ class ChessEngine:
 
     def get_move(self, *args, **kwargs) -> Move:
         res = self.get_moves(*args, **kwargs)
-        return res[min(len(res) - 1, random.choice(self.move_probabilities))]["moves"][0]
+        return res[min(len(res) - 1, random.choice(self.move_probabilities))]["moves"][
+            0
+        ]
 
     def eval_position_static(self, board: BoardInfo) -> EvalScore:
         self._input(f"position fen {board.get_fen()}\neval\n")
-        for line in self._process.stdout:   #  type: ignore
+        for line in self._process.stdout:  #  type: ignore
             if "Final evaluation" in line:
                 return EvalScore(float(line.split()[2]), board.is_white_turn)
 
@@ -184,9 +204,7 @@ class ChessEngine:
         res = self.get_moves(move.board, depth, searchmoves=encode_engine_move(move))
         return res[0]["score"]
 
-    def eval_move(
-        self, move: Move, depth: int = None, prev_move: Move = None
-    ) -> None:
+    def eval_move(self, move: Move, depth: int = None, prev_move: Move = None) -> None:
         n_moves = 0
         cur_eval = self.eval_position(move, depth)
         for piece in move.board.whites if move.is_white else move.board.blacks:
@@ -202,7 +220,7 @@ class ChessEngine:
         else:
             prev_eval = self.eval_position_static(move.board)
 
-        best_line, second_best_line, _ = self.get_moves(move.board, depth)
+        best_line, second_best_line, *_ = self.get_moves(move.board, depth)
         if move == best_line["moves"][0]:
             mark = (
                 MoveEval.PRECISE

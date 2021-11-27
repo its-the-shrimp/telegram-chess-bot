@@ -107,6 +107,7 @@ class BasePiece:
         **kwargs,
     ) -> list[BoardPoint]:
         moves = []
+        cur_piece = board[pos]
         allies_pos = [i.pos for i in board.get_by_type(None, is_white)]
         enemies_pos = [i.pos for i in board.get_by_type(None, not is_white)]
         for diff_seq in cls.move_diffs:
@@ -123,23 +124,32 @@ class BasePiece:
                         continue
 
                 move = BoardPoint(*[i + d for i, d in zip(pos, diff)])
+                piece = board[move]
+                if cls == Pawn:
+                    if diff[0] == 0:
+                        if move not in enemies_pos and (
+                            not reverse or cur_piece is None
+                        ):
+                            moves.append(move)
+                    elif diff[0] != 0:
+                        if reverse:
+                            if (
+                                pos == board.enpassant_pos[1]
+                                or cur_piece is not None
+                                and cur_piece.is_white != is_white
+                            ):
+                                moves.append(move)
+                        else:
+                            if (
+                                move == board.enpassant_pos[1]
+                                or piece is not None
+                                and piece.is_white != is_white
+                            ):
+                                moves.append(move)
 
-                if move in allies_pos and not all:
-                    break
-                elif (
-                    cls == Pawn
-                    and diff[0] != 0
-                    and getattr(board[move], "is_white", (not is_white if reverse else is_white)) == (not is_white if reverse else is_white)
-                    and board.enpassant_pos[1] != move
-                    and not (reverse and pos == board.enpassant_pos[1])
-                ):
-                    break
-                elif cls == Pawn and diff[0] == 0 and move in enemies_pos:
-                    break
-                elif not move:
-                    break
+                elif move not in allies_pos or all:
+                    moves.append(move)
 
-                moves.append(move)
                 if move in enemies_pos:
                     break
 
@@ -170,7 +180,7 @@ class BasePiece:
 
         assert (
             len(possible_pos) == 1
-        ), f"expected 1 possible position for the piece on {pos}, found {len(possible_pos)}."
+        ), f"expected 1 possible position for the piece on {pos}, found {len(possible_pos)}: {[str(i) for i in possible_pos]}"
         return possible_pos[0]
 
     @classmethod
@@ -178,14 +188,15 @@ class BasePiece:
         possible_positions: list[BoardPoint] = []
         for pos in cls._get_moves(
             move.dst,
-            move.board.is_white_turn,
+            move.is_white,
             move.board,
             reverse=cls == Pawn,
             all=True,
         ):
             piece = move.board[pos]
-            if isinstance(piece, cls) and piece.is_white == move.board.is_white_turn:
-                possible_positions.append(pos)
+            if isinstance(piece, cls) and piece.is_white == move.is_white:
+                if cls != Pawn or move.is_capturing() ^ (pos.file == move.dst.file):
+                    possible_positions.append(pos)
 
         if len(possible_positions) < 2 and not (cls == Pawn and move.is_capturing()):
             return ""
@@ -296,7 +307,11 @@ class King(BasePiece):
             Y = 0 if self.is_white else 7
 
             if self.queenside_rook_pos is not None:
-                moves.append(Move.from_piece(self, BoardPoint(2, Y)))
+                moves.append(
+                    Move.from_piece(
+                        self, BoardPoint(2, Y), rook_src=self.queenside_rook_pos
+                    )
+                )
                 for mid_column in range(
                     min(2, self.queenside_rook_pos.file + 1), self.pos.file
                 ):
@@ -309,7 +324,11 @@ class King(BasePiece):
                         break
 
             if self.kingside_rook_pos is not None:
-                moves.append(Move.from_piece(self, BoardPoint(6, Y)))
+                moves.append(
+                    Move.from_piece(
+                        self, BoardPoint(6, Y), rook_src=self.kingside_rook_pos
+                    )
+                )
                 for mid_column in range(
                     self.pos.file + 1, max(7, self.kingside_rook_pos.file)
                 ):
@@ -390,19 +409,12 @@ class Move:
 
     @classmethod
     def from_piece(
-        cls, piece: BasePiece, dst: BoardPoint, new_piece: Type[BasePiece] = None
+        cls,
+        piece: BasePiece,
+        dst: BoardPoint,
+        new_piece: Type[BasePiece] = None,
+        rook_src: Optional[BoardPoint] = None,
     ) -> "Move":
-        if isinstance(piece, King) and dst.file in (2, 6):
-            return cls(
-                piece.board,
-                piece.is_white,
-                piece.pos,
-                dst,
-                type(piece),
-                rook_src=piece.kingside_rook_pos
-                if dst.file == 6
-                else piece.queenside_rook_pos,
-            )
         if piece.board.enpassant_pos[0] == dst:
             killed_piece = piece.board[piece.board.enpassant_pos[0]]
         else:
@@ -412,9 +424,13 @@ class Move:
         if killed_piece and killed_piece.is_white != piece.is_white:
             killed = type(killed_piece)
         elif dst == piece.board.enpassant_pos[1]:
-            assert piece.board.enpassant_pos[0] is not None, "BoardInfo.enpassant_pos elements are out of sync"
+            assert (
+                piece.board.enpassant_pos[0] is not None
+            ), "BoardInfo.enpassant_pos elements are out of sync"
             enpassanted_piece = piece.board[piece.board.enpassant_pos[0]]
-            assert enpassanted_piece is not None, "BoardInfo.enpassant_pos and BoardInfo.board are out of sync"
+            assert (
+                enpassanted_piece is not None
+            ), "BoardInfo.enpassant_pos and BoardInfo.board are out of sync"
             killed = type(enpassanted_piece)
 
         return cls(
@@ -425,6 +441,7 @@ class Move:
             type(piece),
             new_piece=new_piece,
             killed=killed,
+            rook_src=rook_src,
         )
 
     @classmethod
@@ -495,7 +512,9 @@ class Move:
                 row_hint=row_hint,
             )
         if board_obj.enpassant_pos[1] == dst:
-            assert board_obj.enpassant_pos[0] is not None, "BoardInfo.enpassant_pos elements are out of sync"
+            assert (
+                board_obj.enpassant_pos[0] is not None
+            ), "BoardInfo.enpassant_pos elements are out of sync"
             killed_piece = board_obj[board_obj.enpassant_pos[0]]
         else:
             killed_piece = board_obj[dst]
@@ -650,6 +669,8 @@ class Move:
         )
 
     def is_legal(self) -> bool:
+        if not self.src or not self.dst:
+            return False
         test_obj = self.board + self
         return not test_obj.get_king(self.board.is_white_turn).in_check()
 
@@ -904,6 +925,7 @@ class BoardInfo:
 
     def __setitem__(self, pos: BoardPoint, new_pos: BoardPoint):
         piece = self[pos]
+        assert piece is not None, f"piece to move not found on {pos} ({self})"
         cast(BasePiece, piece)._move(new_pos)
 
     def __delitem__(self, pos: BoardPoint):

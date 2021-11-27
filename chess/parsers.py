@@ -177,15 +177,15 @@ class CGNParser:
         GameState.STALEMATE_DRAW: b"SD",
         GameState.THREEFOLD_REPETITION_DRAW: b"TRD",
     }
-    SPECIAL_CHARS = {"##": "#", "#N": "\n", "#T": "\t"}
+    SPECIAL_CHARS = {b"##": b"#", b"#N": b"\n", b"#T": b"\t"}
 
     @classmethod
-    def escape(cls, src: str) -> str:
-        return src.replace("#", "##").replace("\n", "#N").replace("\t", "#T")
+    def escape(cls, src: bytes) -> bytes:
+        return src.replace(b"#", b"##").replace(b"\n", b"#N").replace(b"\t", b"#T")
 
     @classmethod
-    def unescape(cls, src: str) -> str:
-        return re.sub("#[#NT]", lambda match: cls.SPECIAL_CHARS[match[0]], src)
+    def unescape(cls, src: bytes) -> bytes:
+        return re.sub(b"#[#NT]", lambda match: cls.SPECIAL_CHARS[match[0]], src)
 
     @classmethod
     def decode(cls, src: bytes) -> MatchData:
@@ -202,10 +202,11 @@ class CGNParser:
         )
 
         last_pos = BoardInfo.from_fen(data.get(b"S", STARTPOS.encode()).decode())
+        data[b"M"] = cls.unescape(data[b"M"])
         for move in zip(data[b"M"][::2], data[b"M"][1::2]):
             res["moves"].append(
                 Move.from_hash(
-                    int.from_bytes(b"%c%c" % move, byteorder="big"), last_pos
+                    int.from_bytes(b"%c%c" % move, byteorder="little"), last_pos
                 )
             )
             last_pos = res["moves"][-1].apply()
@@ -213,7 +214,7 @@ class CGNParser:
         for k in [b"W", b"R", b"B", b"D", b"S", b"M"]:
             if k in data:
                 del data[k]
-        res["headers"] = {k.decode(): cls.unescape(v.decode()) for k, v in data.items()}
+        res["headers"] = {k.decode(): cls.unescape(v).decode() for k, v in data.items()}
 
         return res
 
@@ -225,7 +226,7 @@ class CGNParser:
         black_name: str = None,
         date: str = None,
         result: GameState = GameState.NORMAL,
-        headers: dict[str, str] = {},
+        headers: dict[str, bytes] = {},
     ) -> bytes:
         res = {
             b"M": b"",
@@ -234,9 +235,10 @@ class CGNParser:
             b"R": cls.RESULT_CODES[result],
             b"D": (date or "?").encode(),
         }
-        res.update({k.encode(): cls.escape(v).encode() for k, v in headers.items()})
+        res.update({k.encode(): cls.escape(v) for k, v in headers.items()})
 
         for move in moves:
-            res[b"M"] += hash(move).to_bytes(2, byteorder="big")
+            res[b"M"] += hash(move).to_bytes(2, byteorder="little")
+        res[b"M"] = cls.escape(res[b"M"])
 
         return b"\n".join([k + b"\t" + v for k, v in res.items()])
